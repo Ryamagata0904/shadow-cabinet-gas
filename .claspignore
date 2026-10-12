@@ -1,11 +1,6 @@
-node_modules/
-prompts/
-.git/
-.gitignore
-README.md
-SOUL.md
-USER.md
-AGENTS.md
-package.json
-package-lock.json
-tsconfig.json
+# すべてのファイルをいったん除外
+**/*
+
+# GASへ送信するファイルのみを許可
+!Code.ts
+!appsscript.json
