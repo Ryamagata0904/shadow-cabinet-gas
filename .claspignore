@@ -1,6 +1,11 @@
+node_modules/
+prompts/
 .git/
 .gitignore
 README.md
 SOUL.md
 USER.md
 AGENTS.md
+package.json
+package-lock.json
+tsconfig.json

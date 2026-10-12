@@ -1,3 +1,5 @@
+declare const Chat: any;
+
 const GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
 const SPACE_NAME = PropertiesService.getScriptProperties().getProperty('SPACE_NAME');
 const LOG_DOC_ID = PropertiesService.getScriptProperties().getProperty('LOG_DOC_ID');
@@ -61,7 +63,7 @@ const SYSTEM_INSTRUCTION = `
 /**
  * log.xml から直近 N 件の対話履歴（短期記憶）を自動抽出する関数
  */
-function getRecentLogs(fileId, count = 2) {
+function getRecentLogs(fileId : any, count = 2) {
   try {
     if (!fileId) return "（過去ログなし）";
     const file = DriveApp.getFileById(fileId.trim());
@@ -76,14 +78,14 @@ function getRecentLogs(fileId, count = 2) {
       .join('\n');
       
     return recent;
-  } catch (e) {
+  } catch (e: any) {
     console.error("短期記憶の取得エラー: " + e.toString());
     return "（過去ログ取得失敗）";
   }
 }
 
 
-function onMessage(event) {
+function onMessage(event: any) {
   console.log(JSON.stringify(event));
 
   // 複数の階層パターンから space.name を安全に探す
@@ -134,12 +136,12 @@ ${userMessage}
     contents: [{ role: 'user', parts: [{ text: userMessage }] }]
   };
 
-  const options = {
+  const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
     method: 'post',
     contentType: 'application/json',
     headers: {
       'x-goog-api-key': GEMINI_API_KEY
-    },
+    } as GoogleAppsScript.URL_Fetch.HttpHeaders,
     payload: JSON.stringify(payload),
     muteHttpExceptions: true // エラー時もステータスコードや詳細を取得
   };
@@ -181,7 +183,7 @@ ${userMessage}
       }
     };
 
-  } catch (e) {
+  } catch (e: any) {
     return {
       hostAppDataAction: {
         chatDataAction: {
@@ -199,7 +201,7 @@ ${userMessage}
 // ==========================================
 // 2. ログの保存処理（XML フォーマット）
 // ==========================================
-function saveLogToDoc(userText, replyText) {
+function saveLogToDoc(userText: any, replyText: any) {
   try {
     if (!LOG_DOC_ID) {
       console.error("LOG_DOC_ID が未設定です。");
@@ -225,7 +227,7 @@ function saveLogToDoc(userText, replyText) {
     file.setContent(currentContent + newEntry);
 
     console.log("XMLログの保存に成功しました。");
-  } catch (e) {
+  } catch (e: any) {
     console.error("ログ保存エラー: " + e.toString());
   }
 }
@@ -234,7 +236,7 @@ function saveLogToDoc(userText, replyText) {
 /**
  * 週次ログを「YYYYMM_W1」形式のファイル名で Google ドライブにアーカイブ保存する関数
  */
-function saveWeeklyArchive(logText) {
+function saveWeeklyArchive(logText: any) {
   const folderId = PropertiesService.getScriptProperties().getProperty('ARCHIVE_FOLDER_ID');
   if (!folderId) {
     console.log("ARCHIVE_FOLDER_ID が未設定のため、アーカイブ作成をスキップしました。");
@@ -271,7 +273,7 @@ function saveWeeklyArchive(logText) {
       console.log(`新規アーカイブファイル (${fileName}) を作成しました。`);
     }
     
-  } catch (e) {
+  } catch (e: any) {
     console.error("アーカイブ保存エラー: " + e.toString());
   }
 }
@@ -332,10 +334,10 @@ ${logText}
     const payload = {
       contents: [{ role: 'user', parts: [{ text: metaPrompt }] }]
     };
-    const options = {
+    const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
       method: 'post',
       contentType: 'application/json',
-      headers: { 'x-goog-api-key': GEMINI_API_KEY },
+      headers: { 'x-goog-api-key': GEMINI_API_KEY } as GoogleAppsScript.URL_Fetch.HttpHeaders,
       payload: JSON.stringify(payload)
     };
 
@@ -357,7 +359,7 @@ ${logText}
         
     console.log("週次レビュー完了。ログファイルを初期化しました。");
 
-  } catch (e) {
+  } catch (e: any) {
     console.error("週次レビューエラー: " + e.toString());
     sendChatNotification("⚠️ 週次レビューでエラーが発生しました: " + e.toString());
   }
@@ -367,7 +369,7 @@ ${logText}
 /**
  * 2. Webhookを使わず、ボット自身から直接送信する通知関数
  */
-function sendChatNotification(messageText) {
+function sendChatNotification(messageText: any) {
   const spaceName = PropertiesService.getScriptProperties().getProperty('SPACE_NAME');
     
     if (!spaceName) {
@@ -382,7 +384,7 @@ function sendChatNotification(messageText) {
         spaceName.trim()
       );
       console.log("【送信成功】ボットから直接メッセージを送信しました。");
-    } catch (e) {
+    } catch (e:any) {
       console.error("【送信失敗】エラー: " + e.toString());
     }
   }

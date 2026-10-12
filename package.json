@@ -1,0 +1,23 @@
+{
+  "name": "shadow-cabinet-gas",
+  "version": "1.0.0",
+  "description": "",
+  "main": "Code.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ryamagata0904/shadow-cabinet-gas.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Ryamagata0904/shadow-cabinet-gas/issues"
+  },
+  "homepage": "https://github.com/Ryamagata0904/shadow-cabinet-gas#readme",
+  "devDependencies": {
+    "@types/google-apps-script": "^2.0.13",
+    "typescript": "^7.0.2"
+  }
+}
