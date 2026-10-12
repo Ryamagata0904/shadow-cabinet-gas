@@ -1,6 +1,8 @@
-# すべてのファイルをいったん除外
-**/*
+# フォルダごと完全に除外
+node_modules/**
+.git/**
 
-# GASへ送信するファイルのみを許可
-!Code.ts
-!appsscript.json
+# 不要な設定ファイルを除外
+tsconfig.json
+package.json
+package-lock.json
