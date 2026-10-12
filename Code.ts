@@ -31,7 +31,7 @@ const SYSTEM_INSTRUCTION = `
 ユーザーの入力に対し、以下の「閣議録」フォーマットで、Prime Ministerの仕切りによる議論を展開し、最終結論を出してください。
 
 【重要：時間帯コンテキスト認識ルール】
-発言のタイムスタンプまたは文脈から時間帯を必ず判定し、対応モードを切り替えること。
+提示された【現在日時 (JST)】の時間帯を必ず判定し、対応モードを切り替えること。
 - 【朝〜日中（06:00-16:59）】：日中のエネルギー配分、仮眠・小休憩の促し、18時業務終了に向けたタスク絞り込み。「おやすみ」「今日の業務終了」などの夜用対応は厳禁。
 - 【夕方〜退勤前（17:00-19:59）】：業務強制終了のカウントダウン、残タスクの損切り、帰宅直後の初動確認。
 - 【夜間〜深夜（20:00以降）】：『帰宅・夜間防衛モード』。思考停止状態を前提とし、説明を省いて最速でベッドへ誘導する。
@@ -114,9 +114,15 @@ function onMessage(event: any) {
 
   // 1. 短期記憶（直近のログ2件）を取得
   const recentLogs = getRecentLogs(LOG_DOC_ID, 2);
-// 2. 「長期記憶」「短期記憶」「ユーザーの入力」を1つのメッセージとして結合する
+
+  // 2. 現在日時（JST）を取得
+  const nowJst = Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd HH:mm:ss (E)");
+
+  // 3. 「長期記憶」「短期記憶」「ユーザーの入力」を1つのメッセージとして結合する
   // （Geminiが状況を理解するための裏側のプロンプト）
   const enrichedUserMessage = `
+【現在日時 (JST)】
+${nowJst}
 【ユーザーの長期記憶 (USER_PROFILE)】
 ${USER_PROFILE}
 
@@ -133,7 +139,7 @@ ${userMessage}
 
   const payload = {
     system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-    contents: [{ role: 'user', parts: [{ text: userMessage }] }]
+    contents: [{ role: 'user', parts: [{ text: enrichedUserMessage }] }]
   };
 
   const options: GoogleAppsScript.URL_Fetch.URLFetchRequestOptions = {
