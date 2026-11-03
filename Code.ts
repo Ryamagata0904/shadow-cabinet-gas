@@ -1,123 +1,336 @@
-/**
- * 週次メタレビューを実行し、GitHub に改善 PR を自動作成する
- */
-function runWeeklyMetaReview() {
-  const logDocId = PropertiesService.getScriptProperties().getProperty('LOG_DOC_ID');
-  const geminiApiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
-  const userProfile = PropertiesService.getScriptProperties().getProperty('USER_PROFILE') || DEFAULT_USER_PROFILE;
+// @ts-ignore
+const Chat = this["Chat"];
 
-  if (!logDocId || !geminiApiKey) {
-    console.error("必要なプロパティが不足しています。");
+const GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+const SPACE_NAME = PropertiesService.getScriptProperties().getProperty('SPACE_NAME');
+const LOG_DOC_ID = PropertiesService.getScriptProperties().getProperty('LOG_DOC_ID');
+const CHAT_WEBHOOK_URL = PropertiesService.getScriptProperties().getProperty('CHAT_WEBHOOK_URL');
+
+// USER_PROFILE はスクリプトプロパティにあればそれを優先し、無ければ Prompts.ts のデフォルトを使用
+const USER_PROFILE = PropertiesService.getScriptProperties().getProperty('USER_PROFILE') || DEFAULT_USER_PROFILE;
+
+const MODEL_NAME = 'gemini-3.8-flash';
+const REVIEW_MODEL_NAME = 'gemini-3.8-flash';
+
+/**
+ * log.xml から直近 N 件の対話履歴（短期記憶）を自動抽出する関数
+ */
+function getRecentLogs(fileId, count = 2) {
+  try {
+    if (!fileId) return "（過去ログなし）";
+    const file = DriveApp.getFileById(fileId.trim());
+    const content = file.getBlob().getDataAsString();
+    
+    const entries = content.split('</log_entry>');
+    if (entries.length <= 1) return "（過去ログなし）";
+    
+    const recent = entries.slice(-count - 1, -1)
+      .map(e => e.trim() + '</log_entry>')
+      .join('\n');
+      
+    return recent;
+  } catch (e) {
+    console.error("短期記憶の取得エラー: " + e.toString());
+    return "（過去ログ取得失敗）";
+  }
+}
+
+function onMessage(event) {
+  console.log(JSON.stringify(event));
+
+  const spaceName = event?.space?.name 
+                 || event?.message?.space?.name 
+                 || event?.chat?.messagePayload?.message?.space?.name
+                 || "取得不可";
+
+  if (event?.space?.name) {
+    PropertiesService.getScriptProperties().setProperty('SPACE_NAME', event.space.name);
+  }
+
+  const userMessage = event?.chat?.messagePayload?.message?.text || event?.message?.text;
+  
+  if (!userMessage) {
+    console.log("メッセージテキストを取得できませんでした。");
+    return;
+  }
+
+  const recentLogs = getRecentLogs(LOG_DOC_ID, 2);
+  const nowJst = Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd HH:mm:ss (E)");
+
+  const enrichedUserMessage = `
+【現在日時 (JST)】
+${nowJst}
+【ユーザーの長期記憶 (USER_PROFILE)】
+${USER_PROFILE}
+
+【直近の会話文脈 (短期記憶)】
+${recentLogs}
+
+---
+【ユーザーからの新しいメッセージ】
+${userMessage}
+`;
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent`;
+
+  const payload = {
+    system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+    contents: [{ role: 'user', parts: [{ text: enrichedUserMessage }] }]
+  };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'x-goog-api-key': GEMINI_API_KEY
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    // @ts-ignore
+    const response = UrlFetchApp.fetch(url, options);
+    const json = JSON.parse(response.getContentText());
+
+    if (json.error) {
+      console.error("Gemini API Error:", JSON.stringify(json.error));
+      return {
+        hostAppDataAction: {
+          chatDataAction: {
+            createMessageAction: {
+              message: {
+                text: `⚠️ APIエラー (${json.error.code}): ${json.error.message}`
+              }
+            }
+          }
+        }
+      };
+    }
+
+    const replyText = json?.candidates?.[0]?.content?.parts?.[0]?.text || "回答を取得できませんでした。";
+    saveLogToDoc(userMessage, replyText);
+
+    return {
+      hostAppDataAction: {
+        chatDataAction: {
+          createMessageAction: {
+            message: {
+              text: replyText
+            }
+          }
+        }
+      }
+    };
+
+  } catch (e) {
+    return {
+      hostAppDataAction: {
+        chatDataAction: {
+          createMessageAction: {
+            message: {
+              text: "⚠️ システムエラーが発生しました: " + e.toString()
+            }
+          }
+        }
+      }
+    };
+  }
+}
+
+function saveLogToDoc(userText, replyText) {
+  try {
+    if (!LOG_DOC_ID) {
+      console.error("LOG_DOC_ID が未設定です。");
+      return;
+    }
+
+    const fileId = LOG_DOC_ID.trim();
+    const file = DriveApp.getFileById(fileId);
+    const currentContent = file.getBlob().getDataAsString();
+    
+    const timestamp = Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd HH:mm:ss");
+    
+    const newEntry = `
+<log_entry>
+  <timestamp>${timestamp}</timestamp>
+  <user_input><![CDATA[${userText}]]></user_input>
+  <ai_response><![CDATA[${replyText}]]></ai_response>
+</log_entry>`;
+
+    file.setContent(currentContent + newEntry);
+    console.log("XMLログの保存に成功しました。");
+  } catch (e) {
+    console.error("ログ保存エラー: " + e.toString());
+  }
+}
+
+function saveWeeklyArchive(logText) {
+  const folderId = PropertiesService.getScriptProperties().getProperty('ARCHIVE_FOLDER_ID');
+  if (!folderId) {
+    console.log("ARCHIVE_FOLDER_ID が未設定のため、アーカイブ作成をスキップしました。");
     return;
   }
 
   try {
-    const file = DriveApp.getFileById(logDocId.trim());
-    const logText = file.getBlob().getDataAsString();
+    const folder = DriveApp.getFolderById(folderId.trim());
+    const now = new Date();
+    
+    const yearMonth = Utilities.formatDate(now, "JST", "yyyyMM");
+    const dayOfMonth = now.getDate();
+    const weekNumber = Math.ceil(dayOfMonth / 7);
+    
+    const fileName = `${yearMonth}_W${weekNumber}.xml`;
+    const existingFiles = folder.getFilesByName(fileName);
 
+    if (existingFiles.hasNext()) {
+      const file = existingFiles.next();
+      const currentContent = file.getBlob().getDataAsString();
+      file.setContent(currentContent + "\n" + logText);
+      console.log(`既存のアーカイブファイル (${fileName}) に追記しました。`);
+    } else {
+      const initialXml = `<?xml version="1.0" encoding="UTF-8"?>\n<weekly_archive>\n${logText}\n</weekly_archive>`;
+      folder.createFile(fileName, initialXml, MimeType.PLAIN_TEXT);
+      console.log(`新規アーカイブファイル (${fileName}) を作成しました。`);
+    }
+    
+  } catch (e) {
+    console.error("アーカイブ保存エラー: " + e.toString());
+  }
+}
+
+/**
+ * 毎週1回実行: ログ分析 ➔ 改善コード生成 ➔ GitHub PR 作成 ➔ Chat通知
+ */
+function runWeeklyMetaReview() {
+  if (!LOG_DOC_ID) return;
+  
+  try {
+    const fileId = LOG_DOC_ID.trim();
+    const file = DriveApp.getFileById(fileId);
+    const logText = file.getBlob().getDataAsString();
+    
     if (!logText || logText.trim() === '<?xml version="1.0" encoding="UTF-8"?>\n<logs>') {
-      console.log("新しいログがないためレビューをスキップしました。");
+      console.log("今週の新しいログはありませんでした。");
       return;
     }
 
-    // 1. Gemini による分析と改善コード生成
     const metaPrompt = `
-あなたはAI改善を行うメタエンジニアです。過去1週間の対話ログを分析し、
-SYSTEM_INSTRUCTION と USER_PROFILE の改善版を作成してください。
+あなたはAIシステムの改善を行う「メタ・プロンプトエンジニア」兼「行動心理アナリスト」です。
+
+以下は、過去1週間のユーザーとAI（Shadow Cabinet）のやり取りログです。
+このデータを分析し、ユーザーが守れなかった約束、行動できなかった原因、AIの対応の反省点を踏まえ、
+Prompts.ts を丸ごと置き換える最新のTypeScriptコードを生成してください。
 
 【現在の SYSTEM_INSTRUCTION】
 ${SYSTEM_INSTRUCTION}
 
 【現在の USER_PROFILE】
-${userProfile}
+${USER_PROFILE}
 
-【対話ログ】
+【過去1週間のログデータ】
 ${logText}
 
-【出力指示】
-Prompts.ts の完全な置き換えコードのみを出力してください。
-コード以外の前置きや解説は一切出力せず、\`\`\`typescript や \`\`\` などのコードブロック記号も含めないでください。
+【出力厳守ルール】
+- 出力は \`Prompts.ts\` の完全なソースコードのみとしてください。
+- 前置き、解説文、マークダウン記号（\`\`\`typescript や \`\`\`）は一切含めないでください。
+- \`const SYSTEM_INSTRUCTION = \`...\`;\` と \`const DEFAULT_USER_PROFILE = \`...\`;\` の2つを必ず定義してください。
 `;
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${REVIEW_MODEL_NAME}:generateContent`;
     const payload = {
       contents: [{ role: 'user', parts: [{ text: metaPrompt }] }]
     };
     const options = {
       method: 'post',
       contentType: 'application/json',
-      headers: { 'x-goog-api-key': geminiApiKey },
+      headers: { 'x-goog-api-key': GEMINI_API_KEY },
       payload: JSON.stringify(payload)
     };
 
     // @ts-ignore
     const response = UrlFetchApp.fetch(url, options);
     const json = JSON.parse(response.getContentText());
-    let newPromptsContent = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    
+    if (json.error) throw new Error(json.error.message);
+    
+    let newPromptsCode = json.candidates[0].content.parts[0].text;
+    
+    // バッククォートの囲みがある場合はトリミング
+    newPromptsCode = newPromptsCode.replace(/^```typescript\n?/, '').replace(/^```\n?/, '').replace(/```$/, '').trim();
 
-    // 前後の余計なマークダウンバッククォートを除去
-    newPromptsContent = newPromptsContent.replace(/^```typescript\n?/, '').replace(/^```\n?/, '').replace(/```$/, '').trim();
+    // 1. GitHub に PR を自動作成
+    const prUrl = createGithubPullRequest(newPromptsCode);
 
-    // 2. GitHub に PR を自動作成
-    const prUrl = createGithubPullRequest(newPromptsContent);
+    // 2. Google Chat へ通知
+    const notification = `🔄 **【Shadow Cabinet 週間自己改善PR作成】**\n\n過去1週間の対話データから、プロンプトとプロファイルの改善案を自動生成しました！\n以下のPRリンクから変更差分を確認し、**[Merge pull request]** を押すと最新版がデプロイされます。\n\n🔗 ${prUrl}`;
+    sendChatNotification(notification);
 
-    // 3. Google Chat に通知
-    sendChatNotification(`🔄 **【Shadow Cabinet 週間自己改善PRが作成されました】**\n今週の対話からプロンプトとプロフィールの改善案を生成しました。\n以下のリンクから差分（Diff）を確認し、[Merge] を押すと自動反映されます。\n🔗 ${prUrl}`);
-
-    // 4. ログ初期化とアーカイブ
-    saveWeeklyArchive(logText);
+    // 3. アーカイブとログ初期化
+    if (typeof saveWeeklyArchive === 'function') {
+      saveWeeklyArchive(logText);
+    }
     file.setContent('<?xml version="1.0" encoding="UTF-8"?>\n<logs>\n');
+    console.log("週次レビューおよびPR作成が正常に完了しました。");
 
-  } catch (e: any) {
-    console.error("週次レビュー失敗: " + e.toString());
+  } catch (e) {
+    console.error("週次レビューエラー: " + e.toString());
     sendChatNotification("⚠️ 週次レビューでエラーが発生しました: " + e.toString());
   }
 }
 
 /**
- * GitHub API を使ってブランチ作成 ➔ ファイルコミット ➔ PR 起票を行う内部関数
+ * GitHub API を使ってブランチ作成 ➔ Prompts.ts 更新 ➔ PR 起票を行う関数
  */
-function createGithubPullRequest(newFileContent: string): string {
+function createGithubPullRequest(newFileContent) {
   const token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
   const owner = PropertiesService.getScriptProperties().getProperty('GITHUB_OWNER');
   const repo = PropertiesService.getScriptProperties().getProperty('GITHUB_REPO');
 
+  if (!token || !owner || !repo) {
+    throw new Error("GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO のいずれかがスクリプトプロパティに設定されていません。");
+  }
+
   const headers = {
-    'Authorization': `token ${token}`,
+    'Authorization': 'token ' + token,
     'Accept': 'application/vnd.github.v3+json',
-    'User-Agent': 'GAS-Auto-PR'
+    'User-Agent': 'GAS-Shadow-Cabinet'
   };
 
   const nowStr = Utilities.formatDate(new Date(), "JST", "yyyyMMdd-HHmmss");
-  const branchName = `auto-prompt-${nowStr}`;
+  const branchName = 'improve/prompts-' + nowStr;
 
   // 1. main ブランチの最新 SHA を取得
-  const refRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/git/ref/heads/main`, { headers });
+  // @ts-ignore
+  const refRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/git/ref/heads/main`, { headers: headers });
   const mainSha = JSON.parse(refRes.getContentText()).object.sha;
 
-  // 2. 新しい改善ブランチを作成
+  // 2. 新しいブランチを作成
+  // @ts-ignore
   UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/git/refs`, {
     method: 'post',
-    headers,
+    headers: headers,
     contentType: 'application/json',
     payload: JSON.stringify({
-      ref: `refs/heads/${branchName}`,
+      ref: 'refs/heads/' + branchName,
       sha: mainSha
     })
   });
 
-  // 3. 対象ファイル（Prompts.ts）の現在の SHA を取得
-  const fileRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/contents/Prompts.ts?ref=main`, { headers });
+  // 3. 既存の Prompts.ts の SHA を取得
+  // @ts-ignore
+  const fileRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/contents/Prompts.ts?ref=main`, { headers: headers });
   const fileSha = JSON.parse(fileRes.getContentText()).sha;
 
   // 4. 新ブランチ上で Prompts.ts を更新コミット
   const base64Content = Utilities.base64Encode(newFileContent, Utilities.Charset.UTF_8);
+  // @ts-ignore
   UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/contents/Prompts.ts`, {
     method: 'put',
-    headers,
+    headers: headers,
     contentType: 'application/json',
     payload: JSON.stringify({
-      message: `feat(prompt): weekly self-improvement update (${nowStr})`,
+      message: `refactor(prompts): weekly self-improvement update (${nowStr})`,
       content: base64Content,
       sha: fileSha,
       branch: branchName
@@ -125,18 +338,55 @@ function createGithubPullRequest(newFileContent: string): string {
   });
 
   // 5. Pull Request を作成
+  // @ts-ignore
   const prRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/pulls`, {
     method: 'post',
-    headers,
+    headers: headers,
     contentType: 'application/json',
     payload: JSON.stringify({
       title: `🔄 【自動改善】週次プロンプト＆プロファイル更新 (${nowStr})`,
       head: branchName,
       base: 'main',
-      body: `過去1週間の対話ログに基づき、Gemini が自動生成した \`Prompts.ts\` の改善案です。\nFiles changed から差分を確認し、問題なければ **Merge pull request** を押してください。自動デプロイが走ります。`
+      body: `過去1週間の対話ログに基づき、Gemini が自動生成した \`Prompts.ts\` の改善提案です。\n\n**【確認手順】**\n1. 上部の **[Files changed]** タブで変更内容を確認してください。\n2. 問題なければ **[Merge pull request]** ➔ **[Confirm merge]** をクリックしてください。\n3. GitHub Actions が自動で走り、GAS へ最新コードがデプロイされます。`
     })
   });
 
   const prJson = JSON.parse(prRes.getContentText());
   return prJson.html_url;
+}
+
+function sendChatNotification(messageText) {
+  const spaceName = PropertiesService.getScriptProperties().getProperty('SPACE_NAME');
+  if (!spaceName) {
+    console.error("SPACE_NAME が未設定です。");
+    return;
+  }
+
+  try {
+    const chatApi = this["Chat"];
+    chatApi.Spaces.Messages.create(
+      { text: messageText },
+      spaceName.trim()
+    );
+    console.log("【送信成功】ボットから直接メッセージを送信しました。");
+  } catch (e) {
+    console.error("【送信失敗】エラー: " + e.toString());
+  }
+}
+
+// 動作確認用テスト関数
+function test_sendChatNotification() {
+  const testMessage = "🧪 【送信テスト】Shadow Cabinet からの直接メッセージ送信確認です。";
+  sendChatNotification(testMessage);
+}
+
+function _forceScopes() {
+  DriveApp.getRootFolder();
+  DocumentApp.create("dummy");
+}
+
+function testCheck() {
+  console.log("✅ 認証完了！スクリプトは正常に動いています。");
+  const folder = DriveApp.getRootFolder();
+  console.log("マイドライブ取得成功: " + folder.getName());
 }
