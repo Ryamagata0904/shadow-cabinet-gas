@@ -390,3 +390,195 @@ function testCheck() {
   const folder = DriveApp.getRootFolder();
   console.log("マイドライブ取得成功: " + folder.getName());
 }
+
+// ==========================================
+// 🧪 検証・単体テスト用メソッド群
+// ==========================================
+
+/**
+ * 【検証1】ログ抽出機能のテスト
+ * ・log.xml から直近7日分のログが正常に抽出できるか
+ * ・元ファイルが消えずに保持されているか
+ */
+function test_checkLogsFiltering() {
+  console.log("--- 【検証1】ログ抽出テスト開始 ---");
+  const fileId = PropertiesService.getScriptProperties().getProperty('LOG_DOC_ID');
+  if (!fileId) {
+    console.error("❌ LOG_DOC_ID が未設定です。");
+    return;
+  }
+
+  const file = DriveApp.getFileById(fileId.trim());
+  const rawContent = file.getBlob().getDataAsString();
+  const totalEntries = (rawContent.match(/<\/log_entry>/g) || []).length;
+  console.log(`📊 元ファイル全体のログ件数: ${totalEntries} 件`);
+
+  // 直近7日分のログを抽出
+  const filteredLogs = getLogsForLastDays(fileId, 7);
+  const filteredEntries = (filteredLogs.match(/<\/log_entry>/g) || []).length;
+  console.log(`📅 直近7日以内の対象ログ件数: ${filteredEntries} 件`);
+
+  if (filteredEntries > 0) {
+    console.log("✅ ログの抽出に成功しました。先頭1件のプレビュー:");
+    const firstEntry = filteredLogs.split('</log_entry>')[0] + '</log_entry>';
+    console.log(firstEntry);
+  } else {
+    console.warn("⚠️ 直近7日以内のログが見つかりませんでした（古い日付のみ、またはログが空です）。");
+  }
+
+  // 元ファイルが変化していないか再確認
+  const afterCheckContent = file.getBlob().getDataAsString();
+  if (rawContent.length === afterCheckContent.length) {
+    console.log("✅ 元ファイル（log.xml）のデータ保持を確認（消去されていません）。");
+  } else {
+    console.error("❌ 警告: 元ファイルのデータ長が変化しています。");
+  }
+}
+
+/**
+ * 【検証2】GitHub API 疎通確認テスト
+ * ・GITHUB_TOKEN / GITHUB_OWNER / GITHUB_REPO の有効性
+ * ・main ブランチの参照権限があるか
+ */
+function test_checkGithubApi() {
+  console.log("--- 【検証2】GitHub API 疎通テスト開始 ---");
+  const token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
+  const owner = PropertiesService.getScriptProperties().getProperty('GITHUB_OWNER');
+  const repo = PropertiesService.getScriptProperties().getProperty('GITHUB_REPO');
+
+  console.log(`設定値確認 -> OWNER: ${owner}, REPO: ${repo}, TOKEN: ${token ? '設定済み(' + token.substring(0, 7) + '...)' : '未設定'}`);
+
+  if (!token || !owner || !repo) {
+    console.error("❌ GitHub 関連のスクリプトプロパティが不足しています。");
+    return;
+  }
+
+  const headers = {
+    'Authorization': 'token ' + token,
+    'Accept': 'application/vnd.github.v3+json',
+    'User-Agent': 'GAS-Shadow-Cabinet'
+  };
+
+  try {
+    // 1. リポジトリへのアクセス確認
+    const repoRes = UrlFetchApp.fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+      headers: headers,
+      muteHttpExceptions: true
+    });
+
+    if (repoRes.getResponseCode() !== 200) {
+      console.error(`❌ リポジトリ取得失敗 (HTTP ${repoRes.getResponseCode()}): ${repoRes.getContentText()}`);
+      return;
+    }
+    console.log("✅ リポジトリへのアクセス権限 OK");
+
+    // 2. main ブランチの SHA 取得確認
+    const refRes = UrlFetchApp.fetch(`https://api.github.com/repos/${owner}/${repo}/git/ref/heads/main`, {
+      headers: headers,
+      muteHttpExceptions: true
+    });
+
+    if (refRes.getResponseCode() !== 200) {
+      console.error(`❌ main ブランチの参照失敗 (HTTP ${refRes.getResponseCode()}): ${refRes.getContentText()}`);
+      return;
+    }
+
+    const sha = JSON.parse(refRes.getContentText()).object.sha;
+    console.log(`✅ main ブランチの SHA 取得成功 (${sha})`);
+
+    // 3. Prompts.ts が存在するか確認
+    const fileRes = UrlFetchApp.fetch(`https://api.github.com/repos/${owner}/${repo}/contents/Prompts.ts?ref=main`, {
+      headers: headers,
+      muteHttpExceptions: true
+    });
+
+    if (fileRes.getResponseCode() === 200) {
+      console.log("✅ Prompts.ts の存在を確認しました。PR作成の前提条件はすべてクリアです。");
+    } else {
+      console.warn(`⚠️ GitHub の main ブランチに Prompts.ts が見つかりません (HTTP ${fileRes.getResponseCode()})。先に手動で push してください。`);
+    }
+
+  } catch (e) {
+    console.error("❌ 通信エラー: " + e.toString());
+  }
+}
+
+/**
+ * 【検証3】週次改善のドライラン（疑似実行）
+ * ・Gemini にプロンプト改善案を作らせる
+ * ・PR 起票や Chat 通知は行わず、生成結果だけをログに出力して品質を確認する
+ */
+function test_dryRunWeeklyMetaReview() {
+  console.log("--- 【検証3】週次改善ドライラン開始 ---");
+  const fileId = PropertiesService.getScriptProperties().getProperty('LOG_DOC_ID');
+  const geminiApiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+
+  if (!fileId || !geminiApiKey) {
+    console.error("❌ 必要なプロパティが不足しています。");
+    return;
+  }
+
+  const logText = getLogsForLastDays(fileId, 7);
+  if (!logText || logText.trim() === '') {
+    console.warn("⚠️ 直近7日分のログが存在しないため、ダミーログを使用してドライランを行います。");
+  }
+
+  const testLogs = logText || `
+<log_entry>
+  <timestamp>2026-11-02 21:30:00</timestamp>
+  <user_input>残業で遅くなった。疲れたのでコンビニ寄って帰る</user_input>
+  <ai_response>Coach: 歩きバナナを摂取し、帰宅後は即ベッド直行せよ。</ai_response>
+</log_entry>`;
+
+  const metaPrompt = `
+あなたはAIシステムの改善を行う「メタ・プロンプトエンジニア」兼「行動心理アナリスト」です。
+以下のログから Prompts.ts の改善版 TypeScript コードのみを出力してください。
+コード以外の解説文やマークダウン記号（\`\`\`typescript や \`\`\`）は含めないでください。
+
+【現在の SYSTEM_INSTRUCTION】
+${SYSTEM_INSTRUCTION}
+
+【現在の USER_PROFILE】
+${USER_PROFILE}
+
+【対話ログ】
+${testLogs}
+`;
+
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${REVIEW_MODEL_NAME}:generateContent`;
+    const response = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': geminiApiKey },
+      payload: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: metaPrompt }] }] }),
+      muteHttpExceptions: true
+    });
+
+    const json = JSON.parse(response.getContentText());
+    if (json.error) {
+      console.error("❌ Gemini API エラー: " + JSON.stringify(json.error));
+      return;
+    }
+
+    let generatedCode = json?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    generatedCode = generatedCode.replace(/^```typescript\n?/, '').replace(/^```\n?/, '').replace(/```$/, '').trim();
+
+    console.log("✅ Gemini による改善コード生成成功！");
+    console.log("--- 生成コードの先頭200文字 ---");
+    console.log(generatedCode.substring(0, 200) + "...\n-----------------------------");
+
+    // 必須要素が含まれているかの構文バリデーション
+    const hasInstruction = generatedCode.includes("SYSTEM_INSTRUCTION");
+    const hasProfile = generatedCode.includes("DEFAULT_USER_PROFILE");
+
+    if (hasInstruction && hasProfile) {
+      console.log("✅ 検証合格: SYSTEM_INSTRUCTION および DEFAULT_USER_PROFILE が正常に出力に含まれています。");
+    } else {
+      console.error(`❌ 構文警告: 必須変数が欠落しています (Instruction: ${hasInstruction}, Profile: ${hasProfile})`);
+    }
+
+  } catch (e) {
+    console.error("❌ ドライラン失敗: " + e.toString());
+  }
+}
