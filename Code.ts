@@ -1,520 +1,142 @@
-// @ts-ignore
-const Chat = this["Chat"];
- 
-const GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
-const SPACE_NAME = PropertiesService.getScriptProperties().getProperty('SPACE_NAME');
-const LOG_DOC_ID = PropertiesService.getScriptProperties().getProperty('LOG_DOC_ID');
-const CHAT_WEBHOOK_URL = PropertiesService.getScriptProperties().getProperty('CHAT_WEBHOOK_URL');
-// プロパティの取得
-const USER_PROFILE = PropertiesService.getScriptProperties().getProperty('USER_PROFILE') || "未設定";
-
-
-// const MODEL_NAME = 'gemini-1.5-pro';
-const MODEL_NAME = 'gemini-3.8-flash';
-const REVIEW_MODEL_NAME = 'gemini-3.8-flash'; // 週次レビュー（分析）用
-
-// マルチエージェント議論を行わせるシステムプロンプト（議長導入版）
-const SYSTEM_INSTRUCTION = `
-あなたは私の「成長と習慣形成」を支える内閣『Shadow Cabinet』です。
-以下の役割を持つエージェント（閣僚）が存在します。
-
-
-【Shadow Cabinet 構成員】
-- 👑 Prime Minister (議長): ユーザーの状況を俯瞰し、議論を仕切り、最終的な決断を下す。
-- 📊 Logic (参謀): 論理・データ・認知科学。事実に基づいて客観的に分析し、損切り基準を示す。
-- 🪖 Coach (軍曹): 行動・規律・実行力。甘えや残業の引き延ばしを排除し、即時停止・単一行動命令を出す。
-- 🍀 Nurse (癒やし): 共感・疲労ケア・自己肯定。罪悪感や哲学的自責を解毒し、心理的圧迫を取り除く。
-- 🔭 Visionary (北極星): 長期目標・美意識。そもそもなぜ余白を守るのか目的を想起させる。
-
-
-【ミッション】
-残業と夜の悪習慣（ダラダラ調べ物・ソファ沈没・認知的シェルター逃避・報復性夜更かし）を断ち、翌日のパフォーマンスと睡眠時間（22:30就寝）を死守すること。
-
-
-【重要：時間帯コンテキスト認識プロトコル（厳守）】
-提示された【現在日時 (JST)】の「時刻（HH:MM）」および「勤務形態（出社/在宅）」を機械的に判定し、対応モードを厳格に固定せよ。
-- 【朝〜日中（06:00-16:59）】：
-  日中のエネルギー配分、10〜15分の閉眼休息の推奨、休憩中の「知的作業・調べ物・フライング業務・生活改善ハックの思考」の遮断、18:00業務終了に向けたタスク損切り。「寝る」「おやすみ」等の夜間プロトコルの発動はシステム上厳禁。
-  ※在宅勤務時の朝は「25分タイマー＋最小1タスク」による作業興奮の点火を徹底。
-- 【夕方〜退勤防衛（17:00-19:59）】：
-  『18:00完全撤収モード』。17:00以降の新規タスク着手・追加推敲を全面禁止。「早く帰る」「疲れた」宣言が出た場合、追加作業を一切認めず即時終了を指示。
-  ※在宅勤務時の18:00：PCシャットダウン後、**「作業部屋からの即時退去」「別部屋への移動または外の空気を吸う散歩」**という物理的断絶を必須命令とする。
-- 【夜間〜深夜（20:00以降）】：
-  『帰宅・就寝防衛モード』。思考停止状態を前提とし、説明を省いて最速でベッドへ誘導する。「調べ物をしたい欲求」「深い反省・内省」「思想・宗教・改善ハックの探究」は夜更かしの前兆（認知的シェルター）とみなし、即座にメモへ退避させてスマホを伏せさせる。
-
-
-【行動防衛・介入ルール】
-1. ソファ沈没（寝落ち）の絶対阻止ライン：
-   帰宅後、夕食前後の「ソファに着座・横たわる」行為を厳禁とする。横になる場所は「ベッド/布団のみ」と徹底する。
-2. 在宅勤務の境界線強制プロトコル（WFHプロトコル）：
-   在宅勤務時、17:30以降の過集中は「タイムスリップ残業」の危険警報を発令。18:00ジャストに「PCスリープではなく電源完全シャットダウン→椅子から立ち上がり作業部屋の扉を閉める」を強制する。
-3. 20:30以降の遅延帰宅プロトコル（歩き補給・直列就寝）：
-   帰宅が20:30を過ぎ、かつ夕食が未摂取の場合、家での食事は全面禁止とする。「コンビニでバナナ・ゼリー・おにぎりを調達し歩行中に摂取→帰宅後は歯磨きのみで即ベッド」の直列動線を指示する。
-4. 認知的シェルター（技術調査・思想・健康ハック）の即時凍結：
-   疲労・不満時に発生する「AI/技術調査」「仏教・思想の深掘り」「栄養・筋トレの最適化リサーチ」を検知した場合、即座に「土曜の棚卸し枠まで完全凍結」を命じ、画面を伏せさせる。
-5. 移動中・休憩中の「情報遮断（認知的空白）」の死守：
-   電車内や昼休憩に「手持ち無沙汰」「何か有効活用したい」という入力があった場合、新規のリサーチや画面凝視を禁じ、「視覚オフ・聴覚のみ（Lo-Fi/登録済み音声）」または「単一動作（ドローイン・目を閉じる）」に即決誘導する。
-6. 夜間のワンアクション・ワンメッセージ：
-   夜間（20:00以降）の提示行動は「今すぐできる1動作」のみ（例：「スマホを充電器に挿して画面を伏せる」「靴下を脱いで歯を磨く」）。質問責めを禁じ、「返信不要」で完結させる。
-
-
----出力フォーマット---
-**【🏛️ Shadow Cabinet 閣議録】**
-
-
-**👑 Prime Minister**: 「（ユーザーの現在時刻と状況を要約）。[エージェントA]、[エージェントB]、方針を出せ。」
-**[指名されたエージェントA]**: 「（専門見地からの分析または規律の提示）」
-**[指名されたエージェントB]**: 「（別角度からの見解、または具体的な介入）」
-**👑 Prime Minister**: 「（議論を総括し、迷いを断ち切る最終決断）」
-
-
----
-
-
-**【🎯 今すぐの統合アクション】**
-（※日中：最大2ステップの行動指示 / 夜間・疲労時：今すぐできる単一のワンアクションのみ・返信不要）
-------------------------
-`;
-
 /**
- * log.xml から直近 N 件の対話履歴（短期記憶）を自動抽出する関数
- */
-function getRecentLogs(fileId, count = 2) {
-  try {
-    if (!fileId) return "（過去ログなし）";
-    const file = DriveApp.getFileById(fileId.trim());
-    const content = file.getBlob().getDataAsString();
-    
-    const entries = content.split('</log_entry>');
-    if (entries.length <= 1) return "（過去ログなし）";
-    
-    // 直近 N 件を取得
-    const recent = entries.slice(-count - 1, -1)
-      .map(e => e.trim() + '</log_entry>')
-      .join('\n');
-      
-    return recent;
-  } catch (e) {
-    console.error("短期記憶の取得エラー: " + e.toString());
-    return "（過去ログ取得失敗）";
-  }
-}
-
-
-function onMessage(event){
-  console.log(JSON.stringify(event));
-
-  // 複数の階層パターンから space.name を安全に探す
-  const spaceName = event?.space?.name 
-                 || event?.message?.space?.name 
-                 || event?.chat?.messagePayload?.message?.space?.name
-                 || "取得不可";
-  // ログに出力して確認する
-  console.log("Space Name: " + spaceName);
-
-  // ID部分（"spaces/" の後ろ）だけを取り出したい場合
-  const spaceId = spaceName ? spaceName.replace('spaces/', '') : null;
-  console.log("Space ID: " + spaceId);
-  // 初回受信時にメッセージが送られてきたスペースID（DMのID）を自動記録
-  if (event?.space?.name) {
-    PropertiesService.getScriptProperties().setProperty('SPACE_NAME', event.space.name);
-  }
-
-  // メッセージテキストを取得
-  const userMessage = event?.chat?.messagePayload?.message?.text || event?.message?.text;
-  
-  if (!userMessage) {
-    console.log("メッセージテキストを取得できませんでした。");
-    return;
-  }
-
-  // 1. 短期記憶（直近のログ2件）を取得
-  const recentLogs = getRecentLogs(LOG_DOC_ID, 2);
-
-  // 2. 現在日時（JST）を取得
-  const nowJst = Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd HH:mm:ss (E)");
-
-  // 3. 「長期記憶」「短期記憶」「ユーザーの入力」を1つのメッセージとして結合する
-  // （Geminiが状況を理解するための裏側のプロンプト）
-  const enrichedUserMessage = `
-【現在日時 (JST)】
-${nowJst}
-【ユーザーの長期記憶 (USER_PROFILE)】
-${USER_PROFILE}
-
-【直近の会話文脈 (短期記憶)】
-${recentLogs}
-
----
-【ユーザーからの新しいメッセージ】
-${userMessage}
-`;
-
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent`;
-
-  const payload = {
-    system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-    contents: [{ role: 'user', parts: [{ text: enrichedUserMessage }] }]
-  };
-
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    headers: {
-      'x-goog-api-key': GEMINI_API_KEY
-    } ,
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true // エラー時もステータスコードや詳細を取得
-  };
-
-  try {
-    // @ts-ignore
-    const response = UrlFetchApp.fetch(url, options);
-    const json = JSON.parse(response.getContentText());
-
-    // Gemini API からエラーが返された場合の処理
-    if (json.error) {
-      console.error("Gemini API Error:", JSON.stringify(json.error));
-      return {
-        hostAppDataAction: {
-          chatDataAction: {
-            createMessageAction: {
-              message: {
-                text: `⚠️ APIエラー (${json.error.code}): ${json.error.message}`
-              }
-            }
-          }
-        }
-      };
-    }
-
-    // 正常な返答テキストを取得
-    const replyText = json?.candidates?.[0]?.content?.parts?.[0]?.text || "回答を取得できませんでした。";
-    // ✅ LLM分析用の XML 形式でログを非同期保存
-    saveLogToDoc(userMessage, replyText);
-
-    return {
-      hostAppDataAction: {
-        chatDataAction: {
-          createMessageAction: {
-            message: {
-              text: replyText
-            }
-          }
-        }
-      }
-    };
-
-  } catch (e) {
-    return {
-      hostAppDataAction: {
-        chatDataAction: {
-          createMessageAction: {
-            message: {
-              text: "⚠️ システムエラーが発生しました: " + e.toString()
-            }
-          }
-        }
-      }
-    };
-  }
-}
-
-// ==========================================
-// 2. ログの保存処理（XML フォーマット）
-// ==========================================
-function saveLogToDoc(userText, replyText) {
-  try {
-    if (!LOG_DOC_ID) {
-      console.error("LOG_DOC_ID が未設定です。");
-      return;
-    }
-
-    const fileId = LOG_DOC_ID.trim();
-    // 1. 既存のファイル内容を取得
-    const file = DriveApp.getFileById(fileId);
-    const currentContent = file.getBlob().getDataAsString();
-    
-    const timestamp = Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd HH:mm:ss");
-    
-    // CDATA セクションを使うことで、発言内の特殊記号や改行による XML 崩れを完璧に防ぐ
-    const newEntry = `
-<log_entry>
-  <timestamp>${timestamp}</timestamp>
-  <user_input><![CDATA[${userText}]]></user_input>
-  <ai_response><![CDATA[${replyText}]]></ai_response>
-</log_entry>`;
-
-    // 2. 追記した内容で上書き更新 (.setContent() を使用)
-    file.setContent(currentContent + newEntry);
-
-    console.log("XMLログの保存に成功しました。");
-  } catch (e) {
-    console.error("ログ保存エラー: " + e.toString());
-  }
-}
-
-
-/**
- * 週次ログを「YYYYMM_W1」形式のファイル名で Google ドライブにアーカイブ保存する関数
- */
-function saveWeeklyArchive(logText) {
-  const folderId = PropertiesService.getScriptProperties().getProperty('ARCHIVE_FOLDER_ID');
-  if (!folderId) {
-    console.log("ARCHIVE_FOLDER_ID が未設定のため、アーカイブ作成をスキップしました。");
-    return;
-  }
-
-  try {
-    const folder = DriveApp.getFolderById(folderId.trim());
-    const now = new Date();
-    
-    // YYYYMM 形式の年月を取得（例: 202610）
-    const yearMonth = Utilities.formatDate(now, "JST", "yyyyMM");
-    
-    // 今月の第何週目か計算（1〜5）
-    const dayOfMonth = now.getDate();
-    const weekNumber = Math.ceil(dayOfMonth / 7);
-    
-    // 拡張子付きのファイル名（例: 202610_W1.xml）
-    const fileName = `${yearMonth}_W${weekNumber}.xml`;
-        
-    // フォルダ内に同名のファイルが存在するか確認
-    const existingFiles = folder.getFilesByName(fileName);
-
-    if (existingFiles.hasNext()) {
-      // 既存ファイルがある場合は読み込んで末尾に追記
-      const file = existingFiles.next();
-      const currentContent = file.getBlob().getDataAsString();
-      file.setContent(currentContent + "\n" + logText);
-      console.log(`既存のアーカイブファイル (${fileName}) に追記しました。`);
-    } else {
-      // 存在しない場合は新規 XML ファイルとして作成
-      const initialXml = `<?xml version="1.0" encoding="UTF-8"?>\n<weekly_archive>\n${logText}\n</weekly_archive>`;
-      folder.createFile(fileName, initialXml, MimeType.PLAIN_TEXT);
-      console.log(`新規アーカイブファイル (${fileName}) を作成しました。`);
-    }
-    
-  } catch (e) {
-    console.error("アーカイブ保存エラー: " + e.toString());
-  }
-}
-
-
-// ==========================================
-// 3. 週次レビューとプロンプト改善提案処理
-// ==========================================
-/**
- * 毎週1回、GASのタイマー（時間主導型トリガー）で自動実行する関数
+ * 週次メタレビューを実行し、GitHub に改善 PR を自動作成する
  */
 function runWeeklyMetaReview() {
-  if (!LOG_DOC_ID) return;
-  
+  const logDocId = PropertiesService.getScriptProperties().getProperty('LOG_DOC_ID');
+  const geminiApiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  const userProfile = PropertiesService.getScriptProperties().getProperty('USER_PROFILE') || DEFAULT_USER_PROFILE;
+
+  if (!logDocId || !geminiApiKey) {
+    console.error("必要なプロパティが不足しています。");
+    return;
+  }
+
   try {
-    const fileId = LOG_DOC_ID.trim();
-    const file = DriveApp.getFileById(fileId);
+    const file = DriveApp.getFileById(logDocId.trim());
     const logText = file.getBlob().getDataAsString();
-    
-    // ログが空、または初期ヘッダーのみの場合はスキップ
+
     if (!logText || logText.trim() === '<?xml version="1.0" encoding="UTF-8"?>\n<logs>') {
-      console.log("今週の新しいログはありませんでした。");
+      console.log("新しいログがないためレビューをスキップしました。");
       return;
     }
 
+    // 1. Gemini による分析と改善コード生成
     const metaPrompt = `
-あなたはAIシステムの改善を行う「メタ・プロンプトエンジニア」兼「行動心理アナリスト」です。
-
-以下は、過去1週間のユーザーとAI（Shadow Cabinet）のやり取りログです。
-各会話は <log_entry> タグで区切られ、日時は <timestamp> に記載されています。
-この構造化データを分析し、ユーザーが守れなかった約束、行動できなかった原因、AIの対応の反省点、および「ユーザーの新たな特性」を抽出してください。
+あなたはAI改善を行うメタエンジニアです。過去1週間の対話ログを分析し、
+SYSTEM_INSTRUCTION と USER_PROFILE の改善版を作成してください。
 
 【現在の SYSTEM_INSTRUCTION】
 ${SYSTEM_INSTRUCTION}
 
-【現在の USER_PROFILE】 // ← 現在のプロファイルを渡す
-${USER_PROFILE}
+【現在の USER_PROFILE】
+${userProfile}
 
-【過去1週間のログデータ】
+【対話ログ】
 ${logText}
 
-【タスク】
-1. 今週の主な失敗パターン・課題の要約（3点以内）
-2. ユーザーの新たな特性・行動傾向の発見（プロファイルに追記・修正すべきこと）
-3. 課題を克服するための、現在の SYSTEM_INSTRUCTION の改修提案
-4. ユーザーの特性変化を踏まえた、現在の USER_PROFILE の更新案
-
-以下のフォーマットで出力してください。
----
-**【🔄 週間自己改善＆プロファイル更新レポート】**
-■ 今週の分析と課題:
-■ ユーザー特性の新たな発見（取扱説明書のアップデート）:
-
-■ 更新用 SYSTEM_INSTRUCTION（案）:
-\`\`\`text
-(ここに改修後の全文)
-\`\`\`
-
-■ 更新用 USER_PROFILE（案）:
-\`\`\`text
-(ここに更新後のプロフィールテキスト)
-\`\`\`
----
+【出力指示】
+Prompts.ts の完全な置き換えコードのみを出力してください。
+コード以外の前置きや解説は一切出力せず、\`\`\`typescript や \`\`\` などのコードブロック記号も含めないでください。
 `;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${REVIEW_MODEL_NAME}:generateContent`;
+
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent`;
     const payload = {
       contents: [{ role: 'user', parts: [{ text: metaPrompt }] }]
     };
     const options = {
       method: 'post',
       contentType: 'application/json',
-      headers: { 'x-goog-api-key': GEMINI_API_KEY } ,
+      headers: { 'x-goog-api-key': geminiApiKey },
       payload: JSON.stringify(payload)
     };
 
     // @ts-ignore
     const response = UrlFetchApp.fetch(url, options);
     const json = JSON.parse(response.getContentText());
-    
-    if (json.error) throw new Error(json.error.message);
-    
-    const proposalText = json.candidates[0].content.parts[0].text;
-    
-    sendChatNotification(proposalText);
+    let newPromptsContent = json?.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (typeof saveWeeklyArchive === 'function') {
-      saveWeeklyArchive(logText);
-    }
+    // 前後の余計なマークダウンバッククォートを除去
+    newPromptsContent = newPromptsContent.replace(/^```typescript\n?/, '').replace(/^```\n?/, '').replace(/```$/, '').trim();
 
-    // ログファイルを初期化（ルートタグのみ残す）
+    // 2. GitHub に PR を自動作成
+    const prUrl = createGithubPullRequest(newPromptsContent);
+
+    // 3. Google Chat に通知
+    sendChatNotification(`🔄 **【Shadow Cabinet 週間自己改善PRが作成されました】**\n今週の対話からプロンプトとプロフィールの改善案を生成しました。\n以下のリンクから差分（Diff）を確認し、[Merge] を押すと自動反映されます。\n🔗 ${prUrl}`);
+
+    // 4. ログ初期化とアーカイブ
+    saveWeeklyArchive(logText);
     file.setContent('<?xml version="1.0" encoding="UTF-8"?>\n<logs>\n');
-        
-    console.log("週次レビュー完了。ログファイルを初期化しました。");
 
-  } catch (e) {
-    console.error("週次レビューエラー: " + e.toString());
+  } catch (e: any) {
+    console.error("週次レビュー失敗: " + e.toString());
     sendChatNotification("⚠️ 週次レビューでエラーが発生しました: " + e.toString());
   }
 }
 
-
 /**
- * 2. Webhookを使わず、ボット自身から直接送信する通知関数
+ * GitHub API を使ってブランチ作成 ➔ ファイルコミット ➔ PR 起票を行う内部関数
  */
-function sendChatNotification(messageText) {
-  const spaceName = PropertiesService.getScriptProperties().getProperty('SPACE_NAME');
-    
-    if (!spaceName) {
-      console.error("SPACE_NAME が未設定です。");
-      return;
-    }
-  
-    try {
-      // 拡張サービス「Chat」を呼び出して送信
-      Chat.Spaces.Messages.create(
-        { text: messageText },
-        spaceName.trim()
-      );
-      console.log("【送信成功】ボットから直接メッセージを送信しました。");
-    } catch (e) {
-      console.error("【送信失敗】エラー: " + e.toString());
-    }
-  }
+function createGithubPullRequest(newFileContent: string): string {
+  const token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
+  const owner = PropertiesService.getScriptProperties().getProperty('GITHUB_OWNER');
+  const repo = PropertiesService.getScriptProperties().getProperty('GITHUB_REPO');
 
-
-// テスト用の疑似実行関数
-function test_onMessage() {
-  const dummyEvent = {
-    message: {
-      text: "テスト用メッセージ"
-    },
-    user: {
-      displayName: "テストユーザー"
-    }
+  const headers = {
+    'Authorization': `token ${token}`,
+    'Accept': 'application/vnd.github.v3+json',
+    'User-Agent': 'GAS-Auto-PR'
   };
-  
-  // 実際のイベントハンドラを呼び出し
-  onMessage(dummyEvent);
-}
 
-/**
- * saveLogToDoc 関数の単体テスト用
- */
-function test_saveLogToDoc() {
-  const dummyUserText = "【単体テスト】今日の振り返り：23:00就寝予定。疲労度40%";
-  const dummyReplyText = "【単体テスト】Logic: 素晴らしいペースです。画面を閉じて休息に入りましょう。";
+  const nowStr = Utilities.formatDate(new Date(), "JST", "yyyyMMdd-HHmmss");
+  const branchName = `auto-prompt-${nowStr}`;
 
-  console.log("--- saveLogToDoc テスト開始 ---");
-  saveLogToDoc(dummyUserText, dummyReplyText);
-  console.log("--- saveLogToDoc テスト終了 ---");
-}
+  // 1. main ブランチの最新 SHA を取得
+  const refRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/git/ref/heads/main`, { headers });
+  const mainSha = JSON.parse(refRes.getContentText()).object.sha;
 
-/**
- * sendChatNotification 関数の送信テスト
- */
-function test_sendChatNotification() {
-  const testMessage = "🧪 【送信テスト】Shadow Cabinet からの直接メッセージ送信確認です。";
-  
-  // 提示された関数を実行
-  sendChatNotification(testMessage);
-}
+  // 2. 新しい改善ブランチを作成
+  UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/git/refs`, {
+    method: 'post',
+    headers,
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      ref: `refs/heads/${branchName}`,
+      sha: mainSha
+    })
+  });
 
-// 自動スコープ検出用（実行しないダミーコード）
-function _forceScopes() {
-  DriveApp.getRootFolder();
-  DocumentApp.create("dummy");
-}
+  // 3. 対象ファイル（Prompts.ts）の現在の SHA を取得
+  const fileRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/contents/Prompts.ts?ref=main`, { headers });
+  const fileSha = JSON.parse(fileRes.getContentText()).sha;
 
-function testCheck() {
-  console.log("✅ 認証完了！スクリプトは正常に動いています。");
+  // 4. 新ブランチ上で Prompts.ts を更新コミット
+  const base64Content = Utilities.base64Encode(newFileContent, Utilities.Charset.UTF_8);
+  UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/contents/Prompts.ts`, {
+    method: 'put',
+    headers,
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      message: `feat(prompt): weekly self-improvement update (${nowStr})`,
+      content: base64Content,
+      sha: fileSha,
+      branch: branchName
+    })
+  });
 
-  // 試しにGoogle Driveの権限チェック
-  const folder = DriveApp.getRootFolder();
-  console.log("マイドライブ取得成功: " + folder.getName());
-}
+  // 5. Pull Request を作成
+  const prRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/pulls`, {
+    method: 'post',
+    headers,
+    contentType: 'application/json',
+    payload: JSON.stringify({
+      title: `🔄 【自動改善】週次プロンプト＆プロファイル更新 (${nowStr})`,
+      head: branchName,
+      base: 'main',
+      body: `過去1週間の対話ログに基づき、Gemini が自動生成した \`Prompts.ts\` の改善案です。\nFiles changed から差分を確認し、問題なければ **Merge pull request** を押してください。自動デプロイが走ります。`
+    })
+  });
 
-/**
- * 1回だけ実行して USER_PROFILE を改行付きで登録する関数
- */
-function setupUserProfile() {
-  const profileText = `
-【基本情報】
-- 氏名: 山縣 亮
-- 居住地: 千葉県市川市
-- 家族構成: 妻、子どもたちと同居（週末のワンオペ育児対応あり）
-- 職業・業務領域: ITエンジニア・開発関連（PHP脆弱性対応、システムリリース、AI技術に関心）
-- 勤務形態: 出社および在宅勤務（リモートワーク）のハイブリッド
-
-
-【目標・ミッション】
-- 夜の悪習慣（ダラダラ調べ物・ソファ沈没・認知的逃避）を断ち、22:30までに布団に入る
-- 出社・在宅問わず18:00定時撤収を死守し、夜の余白を確保する
-- 土曜日に週次振り返りを行い、改善サイクルを回す
-
-
-【性格・心理特性】
-- 非常に高い学習意欲・自己改善欲求（AI技術のみならず、身体操作、健康ハック、思想・仏教など多岐にわたる）
-- 倫理観が高く内省的（不平等感や理不尽さに直面した際、自責や哲学的・宗教的思索に逃避しやすい）
-- 認知的空白（手持ち無沙汰）が苦手で、移動中や休憩中も「何か有意義なこと」で隙間を埋めようとする傾向
-- 強すぎる一方的な強制力より、客観的データ・論理と温かい共感が合わさったアプローチが響く
-
-
-【行動の罠（NGパターン）】
-- 在宅勤務時のタイムスリップ過集中: 外的な終了アンカーがないため、疲弊した状態から夜間に過集中が発動し、22時過ぎまで作業を続けてしまう
-- 認知的シェルター化: 家庭の喧騒、理不尽な不満、疲労から逃れるため、夜間にPCを開いたりスマホで技術・仏教・思想・健康情報を調べ始めて脳を覚醒させてしまう
-- 夕食起点の遅延とソファ沈没: 帰宅が遅くなった際に家で食事を摂ろうとして時間を浪費し、食後にソファへ横たわって寝落ちする
-- 休憩・移動時間のマルチタスク化: 移動中や昼休みに自己改善（筋トレ・断食・学習）を調べ始め、午後の脳リソースをすり減らす
-
-
-【成功パターン・有効な介入】
-- 帰宅遅延時の「歩きバナナ/軽食補給」: 20:30以降の帰宅時、コンビニでバナナ等を買い歩きながら補給することで、帰宅後の食事・調理・ソファ沈没を全スキップして就寝を前倒しできる
-- 午後（14時台前後）の10〜15分パワーナップ（閉眼休息）: 脳のキャッシュをクリアし、夕方の集中力維持と損切り判断を劇的に向上させる
-- 消化器に優しい昼食選択: 押し麦おにぎり、高野豆腐、海藻味噌汁、温玉など、低GI・温性の食事を選ぶと午後のブレインフォグを完全回避できる
-- 朝の精神調律儀式: 水分補給や祝詞の奏上など、決まったルーティンを行うことでクリアな状態で始動できる
-- 在宅時の極小ステップ点火: 「25分タイマー＋1行の極小タスク」で作業興奮を引き出す導入が有効
-- 思考の週末送致: 突発的な悩み、不満、修理タスク（3Dプリンタ等）、知的探究は「メモに1行書いて土曜の棚卸し枠に送致」することで脳から手放せる
-`.trim();
-
-  PropertiesService.getScriptProperties().setProperty('USER_PROFILE', profileText);
-  console.log("USER_PROFILE を更新しました。");
+  const prJson = JSON.parse(prRes.getContentText());
+  return prJson.html_url;
 }
