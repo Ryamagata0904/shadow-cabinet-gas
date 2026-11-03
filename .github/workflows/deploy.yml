@@ -25,5 +25,5 @@ jobs:
           mkdir -p ~/.clasprc
           echo '${{ secrets.CLASPRC_JSON }}' > ~/.clasprc.json
 
-      - name: GAS への強制プッシュ
+      - name: GAS への強制プッシュする。
         run: npx @google/clasp push -f
