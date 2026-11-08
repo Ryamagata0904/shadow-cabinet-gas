@@ -231,7 +231,15 @@ ${USER_PROFILE}
 【過去1週間のログデータ】
 ${logText}
 
-【出力厳守ルール】
+【出力フォーマット指示（厳守）】
+必ず以下の「===REPORT===」と「===CODE===」の区切り文字を使って出力してください。
+
+===REPORT===
+**【🔄 週間自己改善＆プロファイル更新レポート】**
+■ 今週の主な分析・課題（3点以内）:
+■ プロンプト＆プロファイルへの主な反映内容・変更点:
+
+===CODE===
 - 出力は \`Prompts.ts\` の完全なソースコードのみとしてください。
 - 前置き、解説文、マークダウン記号（\`\`\`typescript や \`\`\`）は一切含めないでください。
 - \`const SYSTEM_INSTRUCTION = \`...\`;\` と \`const DEFAULT_USER_PROFILE = \`...\`;\` の2つを必ず定義してください。
@@ -251,11 +259,25 @@ ${logText}
     // @ts-ignore
     const response = UrlFetchApp.fetch(url, options);
     const json = JSON.parse(response.getContentText());
-    
     if (json.error) throw new Error(json.error.message);
     
-    let newPromptsCode = json.candidates[0].content.parts[0].text;
-    
+
+    const rawOutput = json.candidates[0].content.parts[0].text;
+
+    // 1. レポート部分とコード部分を分離
+    const parts = rawOutput.split('===CODE===');
+    let reportText = '';
+    let newPromptsCode = '';
+
+    if (parts.length >= 2) {
+      reportText = parts[0].replace('===REPORT===', '').trim();
+      newPromptsCode = parts[1].trim();
+    } else {
+      newPromptsCode = rawOutput.trim();
+      reportText = "🔄 **【週間自己改善レポート】**\n今週のログに基づきプロンプトを更新しました。";
+    }
+
+        
     // バッククォートの囲みがある場合はトリミング
     newPromptsCode = newPromptsCode.replace(/^```typescript\n?/, '').replace(/^```\n?/, '').replace(/```$/, '').trim();
 
@@ -263,7 +285,11 @@ ${logText}
     const prUrl = createGithubPullRequest(newPromptsCode);
 
     // 2. Google Chat へ通知
-    const notification = `🔄 **【Shadow Cabinet 週間自己改善PR作成】**\n\n過去1週間の対話データから、プロンプトとプロファイルの改善案を自動生成しました！\n以下のPRリンクから変更差分を確認し、**[Merge pull request]** を押すと最新版がデプロイされます。\n\n🔗 ${prUrl}`;
+    const notification = `${reportText}\n\n` +
+      `**【📝 提案された最新プロンプト (Prompts.ts)】**\n` +
+      `\`\`\`typescript\n${newPromptsCode}\n\`\`\`\n\n` +
+      `🔗 **GitHub で差分確認＆マージ（1タップで本番反映）:**\n${prUrl}`;
+    
     sendChatNotification(notification);
 
     // 3. アーカイブとログ初期化
@@ -290,7 +316,12 @@ function createGithubPullRequest(newFileContent) {
   if (!token || !owner || !repo) {
     throw new Error("GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO のいずれかがスクリプトプロパティに設定されていません。");
   }
+  // 余計な空白や改行を取り除く
+  const cleanOwner = owner.trim();
+  const cleanRepo = repo.trim();
+  const cleanToken = token.trim();
 
+  const baseUrl = 'https://api.github.com/repos/' + cleanOwner + '/' + cleanRepo;
   const headers = {
     'Authorization': 'token ' + token,
     'Accept': 'application/vnd.github.v3+json',
@@ -302,12 +333,12 @@ function createGithubPullRequest(newFileContent) {
 
   // 1. main ブランチの最新 SHA を取得
   // @ts-ignore
-  const refRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/git/ref/heads/main`, { headers: headers });
+  const refRes = UrlFetchApp.fetch(baseUrl + '/git/ref/heads/main', { headers: headers });
   const mainSha = JSON.parse(refRes.getContentText()).object.sha;
 
   // 2. 新しいブランチを作成
   // @ts-ignore
-  UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/git/refs`, {
+  UrlFetchApp.fetch(baseUrl + '/git/refs', {
     method: 'post',
     headers: headers,
     contentType: 'application/json',
@@ -317,20 +348,22 @@ function createGithubPullRequest(newFileContent) {
     })
   });
 
-  // 3. 既存の Prompts.ts の SHA を取得
+
+// 3. 既存の Prompts.ts の SHA を取得
   // @ts-ignore
-  const fileRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/contents/Prompts.ts?ref=main`, { headers: headers });
+  const fileRes = UrlFetchApp.fetch(baseUrl + '/contents/Prompts.ts?ref=main', { headers: headers });
   const fileSha = JSON.parse(fileRes.getContentText()).sha;
+
 
   // 4. 新ブランチ上で Prompts.ts を更新コミット
   const base64Content = Utilities.base64Encode(newFileContent, Utilities.Charset.UTF_8);
   // @ts-ignore
-  UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/contents/Prompts.ts`, {
+  UrlFetchApp.fetch(baseUrl + '/contents/Prompts.ts', {
     method: 'put',
     headers: headers,
     contentType: 'application/json',
     payload: JSON.stringify({
-      message: `refactor(prompts): weekly self-improvement update (${nowStr})`,
+      message: 'refactor(prompts): weekly self-improvement update (' + nowStr + ')',
       content: base64Content,
       sha: fileSha,
       branch: branchName
@@ -339,7 +372,7 @@ function createGithubPullRequest(newFileContent) {
 
   // 5. Pull Request を作成
   // @ts-ignore
-  const prRes = UrlFetchApp.fetch(`[https://api.github.com/repos/$](https://api.github.com/repos/$){owner}/${repo}/pulls`, {
+  const prRes = UrlFetchApp.fetch(baseUrl + '/pulls', {
     method: 'post',
     headers: headers,
     contentType: 'application/json',
@@ -400,6 +433,47 @@ function testCheck() {
  * ・log.xml から直近7日分のログが正常に抽出できるか
  * ・元ファイルが消えずに保持されているか
  */
+
+  /**
+   * log.xml から「直近 days 日以内」のログエントリだけを抽出する関数
+   */
+  function getLogsForLastDays(fileId, days = 7) {
+    try {
+      if (!fileId) return "";
+      const file = DriveApp.getFileById(fileId.trim());
+      const content = file.getBlob().getDataAsString();
+      
+      const entries = content.split('</log_entry>');
+      if (entries.length <= 1) return "";
+
+      const now = new Date().getTime();
+      const threshold = now - (days * 24 * 60 * 60 * 1000); // N日前のミリ秒
+      
+      const targetEntries = [];
+
+      for (let i = 0; i < entries.length - 1; i++) {
+        const entry = entries[i].trim() + '</log_entry>';
+        // <timestamp>YYYY-MM-dd HH:mm:ss</timestamp> を抽出
+        const match = entry.match(/<timestamp>(.*?)<\/timestamp>/);
+        if (match && match[1]) {
+          // GASで日付パース（JST）
+          const entryTime = new Date(match[1].replace(/-/g, '/')).getTime();
+          if (entryTime >= threshold) {
+            targetEntries.push(entry);
+          }
+        } else {
+          // タイムスタンプが取れない古いログは念のため含める
+          targetEntries.push(entry);
+        }
+      }
+
+      return targetEntries.join('\n');
+    } catch (e) {
+      console.error("期間ログ抽出エラー: " + e.toString());
+      return "";
+    }
+  }
+
 function test_checkLogsFiltering() {
   console.log("--- 【検証1】ログ抽出テスト開始 ---");
   const fileId = PropertiesService.getScriptProperties().getProperty('LOG_DOC_ID');
