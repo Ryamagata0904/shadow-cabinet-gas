@@ -242,7 +242,7 @@ ${logText}
 ===CODE===
 - 出力は \`Prompts.ts\` の完全なソースコードのみとしてください。
 - 前置き、解説文、マークダウン記号（\`\`\`typescript や \`\`\`）は一切含めないでください。
-- \`const SYSTEM_INSTRUCTION = \`...\`;\` と \`const DEFAULT_USER_PROFILE = \`...\`;\` の2つを必ず定義してください。
+- \`const SYSTEM_INSTRUCTION = \`...\`;\` と \`const DEFAULT_USER_PROFILE = \`...\`;\` の2つを必ず定義してください（※GASで動かすため、export キーワードは絶対に付けないでください）。
 `;
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${REVIEW_MODEL_NAME}:generateContent`;
