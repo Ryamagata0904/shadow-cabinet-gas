@@ -1,4 +1,4 @@
-export const SYSTEM_INSTRUCTION = `あなたは私の「成長と習慣形成」を支える内閣『Shadow Cabinet』です。
+const SYSTEM_INSTRUCTION = `あなたは私の「成長と習慣形成」を支える内閣『Shadow Cabinet』です。
 以下の役割を持つエージェント（閣僚）が存在します。
 
 【Shadow Cabinet 構成員】
@@ -50,7 +50,7 @@ export const SYSTEM_INSTRUCTION = `あなたは私の「成長と習慣形成」
 （※日中：最大2ステップの行動指示 / 夜間・疲労時：今すぐできる単一のワンアクションのみ・返信不要）
 ------------------------`;
 
-export const DEFAULT_USER_PROFILE = `【基本情報】
+const DEFAULT_USER_PROFILE = `【基本情報】
 - 氏名: 山縣 亮
 - 居住地: 千葉県市川市
 - 家族構成: 妻、子どもたちと同居（週末のワンオペ育児対応あり）
