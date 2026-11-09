@@ -1,0 +1,19 @@
+---
+description: GAS特有の制約（export禁止、UrlFetchApp利用等）とプロジェクト規約
+globs: **/*.ts
+alwaysApply: true
+---
+
+# Shadow Cabinet GAS - 開発ガイドライン
+
+## 開発・コーディング制約（厳守）
+1. ES Modules の全面禁止:
+   - export や import キーワードは絶対に使用しないこと。
+   - トップレベルの変数・関数はプロジェクト全体でグローバル共有される。
+2. GAS 組み込みサービスの利用:
+   - 外部通信: UrlFetchApp.fetch()
+   - プロパティ: PropertiesService.getScriptProperties()
+   - ドライブ操作: DriveApp
+3. 責務の分離:
+   - プロンプト・プロフィール改修: Prompts.ts
+   - 実行ロジック: Code.ts

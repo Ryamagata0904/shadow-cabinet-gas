@@ -35,6 +35,62 @@ function getRecentLogs(fileId, count = 2) {
   }
 }
 
+/**
+ * ユーザーの発言から、必要な過去ログの参照件数（0〜10件）をAIに判定させる
+ */
+function determineRequiredLogCount(userInput) {
+  // 空文字などの場合はデフォルト2件
+  if (!userInput || userInput.trim() === '') return 2;
+
+  try {
+    const prompt = `
+ユーザーの以下の発言に対して、適切な助言・回答を行うために「過去の対話ログ」が何件必要か判定してください。
+
+ユーザーの発言:
+"${userInput}"
+
+【判定基準】
+- 0〜1件: 単発の挨拶、現在時刻の報告、過去の文脈が全く不要な新規の愚痴・相談
+- 2〜3件: 「さっきの件」「続き」「どうすればいい？」など直前の流れが必要な場合
+- 5〜10件: 「昨日から続いている」「これまでの経緯」「進捗の振り返り」など複数回にわたる経緯の参照が必要な場合
+
+【出力ルール】
+判定した「半角数字のみ」（例: 0, 2, 5）を出力してください。理由や前置きは一切含めないでください。`;
+
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + MODEL_NAME + ':generateContent';
+    const payload = {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.1, // 判定のブレをなくすため低め
+        maxOutputTokens: 10
+      }
+    };
+
+    // @ts-ignore
+    const response = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': GEMINI_API_KEY },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    const json = JSON.parse(response.getContentText());
+    const text = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+    const count = parseInt(text, 10);
+
+    // 0〜10の範囲内に安全に収める（パース失敗時は安全側に倒して 2件）
+    if (!isNaN(count) && count >= 0 && count <= 10) {
+      console.log(`🧠 AI判断によるログ遡り件数: ${count} 件 (発言: "${userInput.substring(0, 20)}...")`);
+      return count;
+    }
+    return 2;
+  } catch (e) {
+    console.warn("ログ件数判定エラー（デフォルト2件を適用）: " + e.toString());
+    return 2;
+  }
+}
+
 function onMessage(event) {
   console.log(JSON.stringify(event));
 
@@ -54,7 +110,10 @@ function onMessage(event) {
     return;
   }
 
-  const recentLogs = getRecentLogs(LOG_DOC_ID, 2);
+  // 過去ログの件数を判定
+  const logCount = determineRequiredLogCount(userMessage);
+  const recentLogs = logCount > 0 ? getRecentLogs(LOG_DOC_ID, logCount) : "";
+
   const nowJst = Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd HH:mm:ss (E)");
 
   const enrichedUserMessage = `
