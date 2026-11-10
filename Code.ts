@@ -12,6 +12,9 @@ const USER_PROFILE = PropertiesService.getScriptProperties().getProperty('USER_P
 const MODEL_NAME = 'gemini-3.8-flash';
 const REVIEW_MODEL_NAME = 'gemini-3.8-flash';
 
+const DYNAMIC_INTERVENTION_HANDLER = 'executeDynamicIntervention';
+const DYNAMIC_INTERVENTION_LOG_DAYS = 3;
+
 /**
  * log.xml から直近 N 件の対話履歴（短期記憶）を自動抽出する関数
  */
@@ -466,6 +469,206 @@ function sendChatNotification(messageText) {
   }
 }
 
+/**
+ * 毎朝の定期実行を想定。直近ログと内閣プロンプトから本日の介入時刻を1つ決め、
+ * その時刻（JST）に executeDynamicIntervention を1回だけ走らせるトリガーを張る。
+ * インストール用の毎朝トリガーは GAS の時間主導型トリガーで本関数を1本だけ登録する。
+ */
+function scheduleDynamicIntervention() {
+  try {
+    deleteDynamicInterventionTriggers(null);
+
+    const now = new Date();
+    const todayJst = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm (E)');
+    const recentLogs = getLogsForLastDays(LOG_DOC_ID, DYNAMIC_INTERVENTION_LOG_DAYS);
+
+    const prompt = `
+あなたは Shadow Cabinet の行動介入スケジューラです。
+今日のユーザーの状況・癖を考慮し、最も行動介入（アドバイス）が必要な時刻を1つだけ『HH:mm』の形式で出力せよ。
+
+【現在日時 (JST)】
+${todayJst}
+
+【ユーザーの長期記憶 (USER_PROFILE)】
+${USER_PROFILE}
+
+【内閣の行動原則 (SYSTEM_INSTRUCTION)】
+${SYSTEM_INSTRUCTION}
+
+【直近${DYNAMIC_INTERVENTION_LOG_DAYS}日の対話ログ】
+${recentLogs && recentLogs.trim() !== '' ? recentLogs : '（直近ログなし）'}
+
+【出力ルール（厳守）】
+- 現在時刻より後の、今日の時刻を1つだけ選ぶこと。
+- 出力は「HH:mm」のみ（例: 19:30, 15:15）。理由・前置き・改行は禁止。
+`;
+
+    const raw = requestGeminiText(prompt, 0.2, 32);
+    const when = parseInterventionClock(raw);
+    if (!when) {
+      console.error('介入時刻を解釈できませんでした: ' + raw);
+      sendChatNotification('⚠️ 本日の介入時刻を決定できませんでした。Gemini の出力: ' + (raw || '（空）'));
+      return;
+    }
+
+    const triggerAt = jstTodayAt(when.hour, when.minute);
+    const earliest = now.getTime() + 60 * 1000;
+    if (triggerAt.getTime() < earliest) {
+      console.error('介入時刻が過去、または直近1分以内です: ' + when.label);
+      sendChatNotification('⚠️ 本日の介入時刻 ' + when.label + ' は既に過ぎているため、トリガーを設定しませんでした。');
+      return;
+    }
+
+    ScriptApp.newTrigger(DYNAMIC_INTERVENTION_HANDLER)
+      .timeBased()
+      .at(triggerAt)
+      .create();
+
+    console.log('動的介入トリガーを設定しました: ' + when.label + ' JST (' + triggerAt.toISOString() + ')');
+  } catch (err) {
+    console.error('介入スケジュールエラー: ' + err.toString());
+    sendChatNotification('⚠️ 本日の介入時刻の決定に失敗しました: ' + err.toString());
+  }
+}
+
+/**
+ * 指定日時トリガーから1回だけ実行される介入通知。
+ * 送信後、自分を起動したトリガーを削除する。
+ * @param {GoogleAppsScript.Events.TimeDriven} e
+ */
+function executeDynamicIntervention(e) {
+  try {
+    const nowJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss (E)');
+    const recentLogs = getLogsForLastDays(LOG_DOC_ID, DYNAMIC_INTERVENTION_LOG_DAYS);
+
+    const prompt = `
+今この瞬間に必要な、短く強いワンアクション指示（コーチやナースからの介入）を1つだけ生成してください。
+
+【現在日時 (JST)】
+${nowJst}
+
+【ユーザーの長期記憶 (USER_PROFILE)】
+${USER_PROFILE}
+
+【内閣の行動原則 (SYSTEM_INSTRUCTION)】
+${SYSTEM_INSTRUCTION}
+
+【直近${DYNAMIC_INTERVENTION_LOG_DAYS}日の対話ログ】
+${recentLogs && recentLogs.trim() !== '' ? recentLogs : '（直近ログなし）'}
+
+【出力ルール（厳守）】
+- 話者は Coach または Nurse のどちらか1人。時刻と疲労の文脈で選ぶ。
+- 今すぐできる動作を1つだけ。質問・選択肢・閣議録フォーマットは禁止。
+- 2〜4行、プレーンテキスト。先頭行は「Coach:」または「Nurse:」。
+- 末尾に「返信不要」と書く。
+`;
+
+    const advice = (requestGeminiText(prompt, 0.7, 256) || '').trim();
+    const messageText = advice !== ''
+      ? '**【⚡ 動的介入】**\n' + advice
+      : '**【⚡ 動的介入】**\nCoach: 今の作業を1つ残して画面を閉じ、席を立て。返信不要';
+
+    sendChatNotification(messageText);
+
+    // メールでも届けたい場合は、スクリプトプロパティ USER_EMAIL を設定して以下を有効化する。
+    // const userEmail = PropertiesService.getScriptProperties().getProperty('USER_EMAIL');
+    // if (userEmail) {
+    //   GmailApp.sendEmail(userEmail.trim(), 'Shadow Cabinet 動的介入', messageText);
+    // }
+  } catch (err) {
+    console.error('動的介入エラー: ' + err.toString());
+    sendChatNotification('⚠️ 動的介入の生成に失敗しました: ' + err.toString());
+  } finally {
+    deleteDynamicInterventionTriggers(e);
+  }
+}
+
+/**
+ * executeDynamicIntervention 用の指定日時トリガーを削除する。
+ * イベントの triggerUid に一致するトリガーを消し、見つからなければ関数名で掃く。
+ */
+function deleteDynamicInterventionTriggers(e) {
+  const uid = e && e.triggerUid ? String(e.triggerUid) : '';
+  const triggers = ScriptApp.getProjectTriggers();
+
+  if (uid !== '') {
+    for (let i = 0; i < triggers.length; i++) {
+      if (triggers[i].getUniqueId() === uid) {
+        ScriptApp.deleteTrigger(triggers[i]);
+        console.log('動的介入トリガーを削除しました: ' + uid);
+        return;
+      }
+    }
+  }
+
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === DYNAMIC_INTERVENTION_HANDLER) {
+      ScriptApp.deleteTrigger(triggers[i]);
+      console.log('動的介入トリガーを関数名で削除しました: ' + triggers[i].getUniqueId());
+    }
+  }
+}
+
+/**
+ * Gemini にテキスト生成を依頼し、本文だけを返す。
+ */
+function requestGeminiText(prompt, temperature, maxOutputTokens) {
+  if (!GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY が未設定です。');
+  }
+
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + MODEL_NAME + ':generateContent';
+  const payload = {
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: temperature,
+      maxOutputTokens: maxOutputTokens
+    }
+  };
+
+  // @ts-ignore
+  const response = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'x-goog-api-key': GEMINI_API_KEY },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+
+  const json = JSON.parse(response.getContentText());
+  if (json.error) {
+    throw new Error('Gemini API Error (' + json.error.code + '): ' + json.error.message);
+  }
+  return json?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
+
+/**
+ * 「HH:mm」を取り出す。全角数字・全角コロンも受け付ける。
+ * @returns {{hour: number, minute: number, label: string}|null}
+ */
+function parseInterventionClock(text) {
+  if (!text) return null;
+  const normalized = String(text).replace(/[０-９]/g, function (ch) {
+    return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0);
+  }).replace(/：/g, ':');
+  const match = normalized.match(/(?:^|[^\d])([01]?\d|2[0-3]):([0-5]\d)(?!\d)/);
+  if (!match) return null;
+  const hour = parseInt(match[1], 10);
+  const minute = parseInt(match[2], 10);
+  const label = ('0' + hour).slice(-2) + ':' + ('0' + minute).slice(-2);
+  return { hour: hour, minute: minute, label: label };
+}
+
+/**
+ * 今日の JST の時分を、スクリプトのタイムゾーンに依存しない絶対時刻にする。
+ */
+function jstTodayAt(hour, minute) {
+  const ymd = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  const hh = ('0' + hour).slice(-2);
+  const mm = ('0' + minute).slice(-2);
+  return new Date(ymd + 'T' + hh + ':' + mm + ':00+09:00');
+}
+
 // 動作確認用テスト関数
 function test_sendChatNotification() {
   const testMessage = "🧪 【送信テスト】Shadow Cabinet からの直接メッセージ送信確認です。";
@@ -475,6 +678,7 @@ function test_sendChatNotification() {
 function _forceScopes() {
   DriveApp.getRootFolder();
   DocumentApp.create("dummy");
+  ScriptApp.getProjectTriggers();
 }
 
 function testCheck() {
