@@ -472,13 +472,13 @@ function sendChatNotification(messageText) {
 }
 
 /**
- * 毎朝の定期実行を想定。直近ログと内閣プロンプトから本日の介入時刻を1つ決め、
- * その時刻（JST）に executeDynamicIntervention を1回だけ走らせるトリガーを張る。
- * インストール用の毎朝トリガーは GAS の時間主導型トリガーで本関数を1本だけ登録する。
+ * 毎朝の定期実行: 直近ログから本日必要な介入回数（1〜5回）と時刻（JST）を決定し、
+ * それぞれの時刻に個別トリガーを登録する。
  */
 function scheduleDynamicIntervention() {
   try {
-    deleteDynamicInterventionTriggers(null);
+    // 1. 朝の初期化: 前日の残りトリガーをすべてクリーンアップ
+    clearAllDynamicInterventionTriggers();
 
     const now = new Date();
     const todayJst = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm (E)');
@@ -486,8 +486,9 @@ function scheduleDynamicIntervention() {
 
     const prompt = `
 あなたは Shadow Cabinet の行動介入スケジューラです。
-今日のユーザーの状況・癖を考慮し、最も行動介入（アドバイス）が必要な時刻を1つだけ選べ。
-選ぶ時刻は現在時刻より後であること。
+今日のユーザーの状況・癖（昼のブレインフォグ、18:00退勤の引き延ばし、夜のソファ沈没、スマホ逃避等）を考慮し、
+本日行動介入が必要なタイミングを【1〜5回】の間で決定し、その時刻を選定せよ。
+選ぶ時刻はすべて現在時刻より後であること。
 
 【現在日時 (JST)】
 ${todayJst}
@@ -502,32 +503,90 @@ ${SYSTEM_INSTRUCTION}
 ${recentLogs && recentLogs.trim() !== '' ? recentLogs : '（直近ログなし）'}
 
 【出力形式（絶対厳守）】
-返答は半角5文字のみ。形式は HH:mm。例: 19:30
-前置き、説明、理由、箇条書き、番号（1. や 1)）、引用符、改行、空白を一切含めるな。
-1文字だけの数字、日本語、マークダウンは禁止。
-正しい出力: 19:30
-誤った出力: 1
-誤った出力: 1. 19:30
+介入が必要な時刻（HH:mm）を半角カンマ区切りで昇順に出力せよ。
+件数は必ず 1 個から最大 5 個までに収めること。
+前置き、解説、箇条書き番号、改行、マークダウンは一切含めるな。
+
+出力例（3回介入する場合）: 12:30, 18:00, 21:15
+出力例（1回のみの場合）: 19:30
+誤った出力: 1. 12:30 2. 18:00
+誤った出力: 今日は以下の3回です: 12:30, 18:00
 `;
 
     const raw = requestGeminiText(prompt, 0, 1024);
-    const schedule = resolveInterventionSchedule(raw, now);
+    
+    // 2. AIの出力から時刻（HH:mm）を全件抽出し、JSTのDateオブジェクト配列を生成
+    const targetDates = parseInterventionTimesToJst(raw, now);
 
-    ScriptApp.newTrigger(DYNAMIC_INTERVENTION_HANDLER)
-      .timeBased()
-      .at(schedule.triggerAt)
-      .create();
+    if (targetDates.length === 0) {
+      console.warn('有効な未来時刻が取得できなかったため、フォールバック（18:30 JST）を1件設定します。');
+      const fallback = createJstDate('18:30', now);
+      if (fallback.getTime() > now.getTime()) {
+        targetDates.push({ date: fallback, label: '18:30' });
+      }
+    }
 
-    console.log('動的介入トリガーを設定しました: ' + schedule.label + ' JST (' + schedule.triggerAt.toISOString() + ')' + (schedule.usedFallback ? ' [fallback]' : ''));
+    // 3. 最大5件まで動的トリガーを個別に登録
+    const registered = [];
+    const count = Math.min(targetDates.length, 5);
+
+    for (let i = 0; i < count; i++) {
+      const item = targetDates[i];
+      ScriptApp.newTrigger(DYNAMIC_INTERVENTION_HANDLER)
+        .timeBased()
+        .at(item.date)
+        .create();
+      registered.push(item.label);
+    }
+
+    console.log(`✅ 動的介入トリガーを ${registered.length} 件設定しました (JST): ${registered.join(', ')}`);
+
   } catch (err) {
     console.error('介入スケジュールエラー: ' + err.toString());
-    sendChatNotification('⚠️ 本日の介入時刻の決定に失敗しました: ' + err.toString());
+    sendChatNotification('⚠️ 本日の介入スケジュールの設定に失敗しました: ' + err.toString());
   }
 }
 
 /**
- * 指定日時トリガーから1回だけ実行される介入通知。
- * 送信後、自分を起動したトリガーを削除する。
+ * AIのテキストから HH:mm を抽出し、JST（UTC+9）の未来日時として配列化する
+ */
+function parseInterventionTimesToJst(rawText, now) {
+  if (!rawText) return [];
+
+  // 正規表現で HH:mm 形式をすべて抽出
+  const matches = rawText.match(/(?:[01]\d|2[0-3]):[0-5]\d/g);
+  if (!matches) return [];
+
+  // 重複排除
+  const uniqueTimes = Array.from(new Set(matches)).sort();
+  const results = [];
+
+  for (const timeStr of uniqueTimes) {
+    const targetDate = createJstDate(timeStr, now);
+    // 現在より未来の時刻のみ採用
+    if (targetDate.getTime() > now.getTime()) {
+      results.push({
+        date: targetDate,
+        label: timeStr
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * JST（Asia/Tokyo）基準で指定時刻（HH:mm）の Date オブジェクトを安全に生成する
+ */
+function createJstDate(timeStr, baseDate) {
+  const jstDateStr = Utilities.formatDate(baseDate, 'Asia/Tokyo', 'yyyy-MM-dd');
+  // ISO-8601 形式 (+09:00) で明示的にパースすることで、GAS環境のタイムゾーン差異を完全排除
+  return new Date(`${jstDateStr}T${timeStr}:00+09:00`);
+}
+
+/**
+ * 指定日時トリガーから実行される介入通知。
+ * 送信後、「自分を起動したその1つのトリガーのみ」を削除する。
  * @param {GoogleAppsScript.Events.TimeDriven} e
  */
 function executeDynamicIntervention(e) {
@@ -564,44 +623,47 @@ ${recentLogs && recentLogs.trim() !== '' ? recentLogs : '（直近ログなし�
 
     sendChatNotification(messageText);
 
-    // メールでも届けたい場合は、スクリプトプロパティ USER_EMAIL を設定して以下を有効化する。
-    // const userEmail = PropertiesService.getScriptProperties().getProperty('USER_EMAIL');
-    // if (userEmail) {
-    //   GmailApp.sendEmail(userEmail.trim(), 'Shadow Cabinet 動的介入', messageText);
-    // }
   } catch (err) {
     console.error('動的介入エラー: ' + err.toString());
     sendChatNotification('⚠️ 動的介入の生成に失敗しました: ' + err.toString());
   } finally {
-    deleteDynamicInterventionTriggers(e);
+    // 実行完了時：発火したトリガー単体のみを削除（他の未実行トリガーは残す）
+    deleteSingleTrigger(e);
   }
 }
 
 /**
- * executeDynamicIntervention 用の指定日時トリガーを削除する。
- * イベントの triggerUid に一致するトリガーを消し、見つからなければ関数名で掃く。
+ * 発火したトリガー（単一）のみを削除する
  */
-function deleteDynamicInterventionTriggers(e) {
+function deleteSingleTrigger(e) {
   const uid = e && e.triggerUid ? String(e.triggerUid) : '';
+  if (!uid) return;
+
   const triggers = ScriptApp.getProjectTriggers();
-
-  if (uid !== '') {
-    for (let i = 0; i < triggers.length; i++) {
-      if (triggers[i].getUniqueId() === uid) {
-        ScriptApp.deleteTrigger(triggers[i]);
-        console.log('動的介入トリガーを削除しました: ' + uid);
-        return;
-      }
-    }
-  }
-
   for (let i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === DYNAMIC_INTERVENTION_HANDLER) {
+    if (triggers[i].getUniqueId() === uid) {
       ScriptApp.deleteTrigger(triggers[i]);
-      console.log('動的介入トリガーを関数名で削除しました: ' + triggers[i].getUniqueId());
+      console.log('実行済み動的トリガーを削除しました: ' + uid);
+      return;
     }
   }
 }
+
+/**
+ * 朝の初期化用: 残存している executeDynamicIntervention トリガーを全削除する
+ */
+function clearAllDynamicInterventionTriggers() {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === DYNAMIC_INTERVENTION_HANDLER) {
+      ScriptApp.deleteTrigger(triggers[i]);
+      console.log('古い動的トリガーをクリアしました: ' + triggers[i].getUniqueId());
+    }
+  }
+}
+
+
+
 
 /**
  * Gemini にテキスト生成を依頼し、本文だけを返す。
