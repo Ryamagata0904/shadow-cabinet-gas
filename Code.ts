@@ -14,6 +14,8 @@ const REVIEW_MODEL_NAME = 'gemini-3.8-flash';
 
 const DYNAMIC_INTERVENTION_HANDLER = 'executeDynamicIntervention';
 const DYNAMIC_INTERVENTION_LOG_DAYS = 3;
+const DEFAULT_INTERVENTION_TIME = '19:30';
+const INTERVENTION_CLOCK_PATTERN = /(?:[01]\d|2[0-3]):[0-5]\d/;
 
 /**
  * log.xml から直近 N 件の対話履歴（短期記憶）を自動抽出する関数
@@ -484,7 +486,8 @@ function scheduleDynamicIntervention() {
 
     const prompt = `
 あなたは Shadow Cabinet の行動介入スケジューラです。
-今日のユーザーの状況・癖を考慮し、最も行動介入（アドバイス）が必要な時刻を1つだけ『HH:mm』の形式で出力せよ。
+今日のユーザーの状況・癖を考慮し、最も行動介入（アドバイス）が必要な時刻を1つだけ選べ。
+選ぶ時刻は現在時刻より後であること。
 
 【現在日時 (JST)】
 ${todayJst}
@@ -498,33 +501,24 @@ ${SYSTEM_INSTRUCTION}
 【直近${DYNAMIC_INTERVENTION_LOG_DAYS}日の対話ログ】
 ${recentLogs && recentLogs.trim() !== '' ? recentLogs : '（直近ログなし）'}
 
-【出力ルール（厳守）】
-- 現在時刻より後の、今日の時刻を1つだけ選ぶこと。
-- 出力は「HH:mm」のみ（例: 19:30, 15:15）。理由・前置き・改行は禁止。
+【出力形式（絶対厳守）】
+返答は半角5文字のみ。形式は HH:mm。例: 19:30
+前置き、説明、理由、箇条書き、番号（1. や 1)）、引用符、改行、空白を一切含めるな。
+1文字だけの数字、日本語、マークダウンは禁止。
+正しい出力: 19:30
+誤った出力: 1
+誤った出力: 1. 19:30
 `;
 
-    const raw = requestGeminiText(prompt, 0.2, 32);
-    const when = parseInterventionClock(raw);
-    if (!when) {
-      console.error('介入時刻を解釈できませんでした: ' + raw);
-      sendChatNotification('⚠️ 本日の介入時刻を決定できませんでした。Gemini の出力: ' + (raw || '（空）'));
-      return;
-    }
-
-    const triggerAt = jstTodayAt(when.hour, when.minute);
-    const earliest = now.getTime() + 60 * 1000;
-    if (triggerAt.getTime() < earliest) {
-      console.error('介入時刻が過去、または直近1分以内です: ' + when.label);
-      sendChatNotification('⚠️ 本日の介入時刻 ' + when.label + ' は既に過ぎているため、トリガーを設定しませんでした。');
-      return;
-    }
+    const raw = requestGeminiText(prompt, 0, 1024);
+    const schedule = resolveInterventionSchedule(raw, now);
 
     ScriptApp.newTrigger(DYNAMIC_INTERVENTION_HANDLER)
       .timeBased()
-      .at(triggerAt)
+      .at(schedule.triggerAt)
       .create();
 
-    console.log('動的介入トリガーを設定しました: ' + when.label + ' JST (' + triggerAt.toISOString() + ')');
+    console.log('動的介入トリガーを設定しました: ' + schedule.label + ' JST (' + schedule.triggerAt.toISOString() + ')' + (schedule.usedFallback ? ' [fallback]' : ''));
   } catch (err) {
     console.error('介入スケジュールエラー: ' + err.toString());
     sendChatNotification('⚠️ 本日の介入時刻の決定に失敗しました: ' + err.toString());
@@ -643,20 +637,59 @@ function requestGeminiText(prompt, temperature, maxOutputTokens) {
 }
 
 /**
- * 「HH:mm」を取り出す。全角数字・全角コロンも受け付ける。
+ * 返答本文から HH:mm を抜き出す。箇条書き番号や前置きが混ざっても時刻だけを拾う。
+ * 全角数字・全角コロンは半角へ揃えてから判定する。
  * @returns {{hour: number, minute: number, label: string}|null}
  */
 function parseInterventionClock(text) {
-  if (!text) return null;
+  if (text === null || text === undefined) return null;
   const normalized = String(text).replace(/[０-９]/g, function (ch) {
     return String.fromCharCode(ch.charCodeAt(0) - 0xFEE0);
   }).replace(/：/g, ':');
-  const match = normalized.match(/(?:^|[^\d])([01]?\d|2[0-3]):([0-5]\d)(?!\d)/);
+  const match = normalized.match(INTERVENTION_CLOCK_PATTERN);
   if (!match) return null;
-  const hour = parseInt(match[1], 10);
-  const minute = parseInt(match[2], 10);
-  const label = ('0' + hour).slice(-2) + ':' + ('0' + minute).slice(-2);
-  return { hour: hour, minute: minute, label: label };
+  const label = match[0];
+  return {
+    hour: parseInt(label.slice(0, 2), 10),
+    minute: parseInt(label.slice(3, 5), 10),
+    label: label
+  };
+}
+
+/**
+ * 抽出失敗、またはその時刻がもう過ぎているときは 19:30 を使う。
+ * フォールバック時刻も過ぎていれば翌日の同時刻にし、トリガー作成が過去日付で失敗しないようにする。
+ */
+function resolveInterventionSchedule(rawText, now) {
+  const parsed = parseInterventionClock(rawText);
+  const parsedAt = parsed ? jstTodayAt(parsed.hour, parsed.minute) : null;
+  const parsedIsFuture = parsedAt && parsedAt.getTime() >= now.getTime() + 60 * 1000;
+
+  let label = DEFAULT_INTERVENTION_TIME;
+  let usedFallback = true;
+  if (parsed && parsedIsFuture) {
+    label = parsed.label;
+    usedFallback = false;
+  } else if (!parsed) {
+    console.warn('介入時刻を解釈できませんでした: ' + rawText + ' 。フォールバック ' + DEFAULT_INTERVENTION_TIME + ' を使用します。');
+  } else {
+    console.warn('介入時刻が過去、または直近1分以内です: ' + parsed.label + ' 。フォールバック ' + DEFAULT_INTERVENTION_TIME + ' を使用します。');
+  }
+
+  const fallback = parseInterventionClock(label);
+  let triggerAt = jstTodayAt(fallback.hour, fallback.minute);
+  if (triggerAt.getTime() < now.getTime() + 60 * 1000) {
+    triggerAt = new Date(triggerAt.getTime() + 24 * 60 * 60 * 1000);
+    console.warn('フォールバック ' + label + ' も過ぎているため、翌日の同時刻にトリガーを設定します。');
+  }
+
+  return {
+    hour: fallback.hour,
+    minute: fallback.minute,
+    label: label,
+    usedFallback: usedFallback,
+    triggerAt: triggerAt
+  };
 }
 
 /**
