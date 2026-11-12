@@ -616,7 +616,7 @@ ${recentLogs && recentLogs.trim() !== '' ? recentLogs : '（直近ログなし�
 - 末尾に「返信不要」と書く。
 `;
 
-    const advice = (requestGeminiText(prompt, 0.7, 256) || '').trim();
+    const advice = (requestGeminiText(prompt, 0.7, 1024) || '').trim();
     const messageText = advice !== ''
       ? '**【⚡ 動的介入】**\n' + advice
       : '**【⚡ 動的介入】**\nCoach: 今の作業を1つ残して画面を閉じ、席を立て。返信不要';
