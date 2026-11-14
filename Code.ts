@@ -121,9 +121,21 @@ function onMessage(event) {
 
   const nowJst = Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd HH:mm:ss (E)");
 
+  // バイタル要約を取得（取得失敗時もメイン処理が止まらないよう保護）
+  let vitalSummary = '【バイタルデータ（Garmin）】データ未取得';
+  try {
+    vitalSummary = getVitalSummaryForPrompt(5);
+  } catch (e) {
+    console.warn('バイタルサマリー取得スキップ: ' + e);
+  }
+
   const enrichedUserMessage = `
 【現在日時 (JST)】
 ${nowJst}
+
+
+${vitalSummary}
+
 【ユーザーの長期記憶 (USER_PROFILE)】
 ${USER_PROFILE}
 
@@ -498,7 +510,13 @@ function scheduleDynamicIntervention() {
       ? "本日は【休日】です。「退勤」などの仕事の概念は除外してください。休日の昼夜逆転、ダラダラとしたスマホ逃避、夜ふかし等の癖を考慮し、"
       : "本日は【仕事（平日）】です。昼のブレインフォグ、18:00退勤の引き延ばし、夜のソファ沈没等の癖を考慮し、";
     // --- ここまで ---
-
+    // バイタル要約を取得（取得失敗時もメイン処理が止まらないよう保護）
+    let vitalSummary = '【バイタルデータ（Garmin）】データ未取得';
+    try {
+      vitalSummary = getVitalSummaryForPrompt(5);
+    } catch (e) {
+      console.warn('バイタルサマリー取得スキップ: ' + e);
+    }
 
     const prompt = `
 あなたは Shadow Cabinet の行動介入スケジューラです。
@@ -508,6 +526,8 @@ ${behaviorContext}
 
 【現在日時 (JST)】
 ${todayJst}
+
+${vitalSummary}
 
 【ユーザーの長期記憶 (USER_PROFILE)】
 ${USER_PROFILE}
@@ -610,11 +630,21 @@ function executeDynamicIntervention(e) {
     const nowJst = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss (E)');
     const recentLogs = getLogsForLastDays(LOG_DOC_ID, DYNAMIC_INTERVENTION_LOG_DAYS);
 
+    // バイタル要約を取得（取得失敗時もメイン処理が止まらないよう保護）
+    let vitalSummary = '【バイタルデータ（Garmin）】データ未取得';
+    try {
+      vitalSummary = getVitalSummaryForPrompt(5);
+    } catch (e) {
+      console.warn('バイタルサマリー取得スキップ: ' + e);
+    }
+
     const prompt = `
 今この瞬間に必要な、短く強いワンアクション指示（コーチやナースからの介入）を1つだけ生成してください。
 
 【現在日時 (JST)】
 ${nowJst}
+
+${vitalSummary}
 
 【ユーザーの長期記憶 (USER_PROFILE)】
 ${USER_PROFILE}
