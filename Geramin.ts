@@ -202,3 +202,40 @@ function getVitalSummaryForPrompt(recentDays = 7) {
 
   return lines.join('\n');
 }
+
+function testGarminEndpoints() {
+  const token = getGarminAccessToken_();
+  const now = new Date();
+  const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  const startDate = Utilities.formatDate(start, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const endDate = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const startSec = Math.floor(start.getTime() / 1000);
+  const endSec = Math.floor(now.getTime() / 1000);
+
+  // Garmin Connect / Personal API で使われる代表的な血圧エンドポイント候補
+  const candidates = [
+    `/bloodpressure-service/bloodpressure/${startDate}/${endDate}`,
+    `/bloodpressure-service/bloodpressure/daily/${endDate}`,
+    `/wellness-api/rest/bloodPressures?uploadStartTimeInSeconds=${startSec}&uploadEndTimeInSeconds=${endSec}`,
+    `/personal-api/wellness/bloodPressures?uploadStartTimeInSeconds=${startSec}&uploadEndTimeInSeconds=${endSec}`,
+    `/personal-api/bloodpressure/range/${startDate}/${endDate}`
+  ];
+
+  for (const path of candidates) {
+    const res = UrlFetchApp.fetch(`${GARMIN_BASE_URL}${path}`, {
+      method: 'get',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json'
+      },
+      muteHttpExceptions: true
+    });
+
+    const code = res.getResponseCode();
+    console.log(`[${code}] ${path}`);
+    if (code === 200) {
+      console.log('★取得成功レスポンス:', res.getContentText().slice(0, 500));
+    }
+  }
+}
