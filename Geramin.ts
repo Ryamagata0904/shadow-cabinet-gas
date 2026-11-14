@@ -1,6 +1,7 @@
 const GARMIN_BASE_URL = 'https://personal.connectapi.garmin.com';
 const VITAL_FILE_NAME = 'ShadowCabinet_VitalLogs';
-const VITAL_SHEET_NAME = 'DailyVitals';
+const DAILY_SHEET_NAME = 'DailyVitals';
+const INTRADAY_SHEET_NAME = 'IntradayVitals';
 
 /**
  * Garmin Personal API キーから 24時間有効なアクセストークンを取得（キャッシュ利用）
@@ -41,9 +42,9 @@ function getGarminAccessToken_() {
 }
 
 /**
- * チャットログと同じフォルダにある保存先シートを取得（なければ自動作成）
+ * チャットログと同じフォルダにある保存先スプレッドシートを取得（なければ自動作成）
  */
-function getVitalSheet_() {
+function getVitalSpreadsheet_() {
   const logFile = DriveApp.getFileById(LOG_DOC_ID);
   const parents = logFile.getParents();
   const folder = parents.hasNext() ? parents.next() : DriveApp.getRootFolder();
@@ -56,40 +57,25 @@ function getVitalSheet_() {
   } else {
     ss = SpreadsheetApp.create(VITAL_FILE_NAME);
     DriveApp.getFileById(ss.getId()).moveTo(folder);
+    const defaultSheet = ss.getActiveSheet();
+    defaultSheet.setName(DAILY_SHEET_NAME);
+  }
+  return ss;
+}
 
-    const sheet = ss.getActiveSheet();
-    sheet.setName(VITAL_SHEET_NAME);
-    sheet.appendRow([
-      'date',
-      'hrv_last_night',
-      'hrv_status',
-      'bb_max',
-      'bb_latest',
-      'stress_avg',
-      'steps',
-      'sleep_hours',
-      'updated_at'
-    ]);
+/**
+ * 指定名のシートを取得（なければヘッダー付きで作成）
+ */
+function getOrCreateSheet_(ss, sheetName, headers) {
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+  }
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(headers);
     sheet.setFrozenRows(1);
   }
-
-  let targetSheet = ss.getSheetByName(VITAL_SHEET_NAME);
-  if (!targetSheet) {
-    targetSheet = ss.insertSheet(VITAL_SHEET_NAME);
-    targetSheet.appendRow([
-      'date',
-      'hrv_last_night',
-      'hrv_status',
-      'bb_max',
-      'bb_latest',
-      'stress_avg',
-      'steps',
-      'sleep_hours',
-      'updated_at'
-    ]);
-    targetSheet.setFrozenRows(1);
-  }
-  return targetSheet;
+  return sheet;
 }
 
 /**
@@ -113,7 +99,7 @@ function fetchGarminJson_(path, token) {
 }
 
 /**
- * 【日次バッチ用】Garmin から直近3日分のバイタル（HRV/BodyBattery/ストレス/歩数/睡眠）を取得しシートを更新
+ * 【定期実行用】日次サマリー（DailyVitals）と時間帯別ログ（IntradayVitals）の両方を同期
  */
 function syncGarminVitalsToSheet() {
   const token = getGarminAccessToken_();
@@ -124,7 +110,6 @@ function syncGarminVitalsToSheet() {
   const endDate = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd');
   const updatedAt = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
 
-  // 日付ごとのデータをまとめるマップ
   const dailyMap = {};
   const ensureDay = function(dateStr) {
     if (!dateStr) return null;
@@ -143,6 +128,9 @@ function syncGarminVitalsToSheet() {
     return dailyMap[dateStr];
   };
 
+  // 時間帯別 Body Battery マップ（キー: "yyyy-MM-dd HH:00"）
+  const hourlyBbMap = {};
+
   // 1. HRV（心拍変動）
   const hrvData = fetchGarminJson_(`/hrv-service/hrv/daily/${startDate}/${endDate}`, token);
   if (hrvData && Array.isArray(hrvData.hrvSummaries)) {
@@ -158,17 +146,35 @@ function syncGarminVitalsToSheet() {
     }
   }
 
-  // 2. Body Battery
+  // 2. Body Battery（日次ピーク＋時間ごとの推移配列を抽出）
   const bbData = fetchGarminJson_(`/wellness-service/wellness/bodyBattery/reports/daily?startDate=${startDate}&endDate=${endDate}`, token);
   if (Array.isArray(bbData)) {
     for (const item of bbData) {
       const rec = ensureDay(item.date);
-      if (!rec) continue;
       if (Array.isArray(item.bodyBatteryValuesArray) && item.bodyBatteryValuesArray.length > 0) {
-        const levels = item.bodyBatteryValuesArray
-          .map(function(pair) { return Array.isArray(pair) ? Number(pair[1]) : NaN; })
-          .filter(function(val) { return !isNaN(val); });
-        if (levels.length > 0) {
+        const levels = [];
+        for (const pair of item.bodyBatteryValuesArray) {
+          if (!Array.isArray(pair) || pair.length < 2) continue;
+          const ts = Number(pair[0]);
+          const val = Number(pair[1]);
+          if (isNaN(ts) || isNaN(val)) continue;
+
+          levels.push(val);
+
+          // タイムスタンプから JST の日付と「時（00〜23）」を割り出して時間帯別マップへ格納
+          const dt = new Date(ts);
+          const dStr = Utilities.formatDate(dt, 'Asia/Tokyo', 'yyyy-MM-dd');
+          const hStr = Utilities.formatDate(dt, 'Asia/Tokyo', 'HH');
+          const key = `${dStr} ${hStr}:00`;
+          hourlyBbMap[key] = {
+            dateHour: key,
+            date: dStr,
+            hour: Number(hStr),
+            bbLevel: val
+          };
+        }
+
+        if (rec && levels.length > 0) {
           rec.bbMax = Math.max.apply(null, levels);
           rec.bbLatest = levels[levels.length - 1];
         }
@@ -211,74 +217,88 @@ function syncGarminVitalsToSheet() {
     }
   }
 
-  const dates = Object.keys(dailyMap).sort();
-  if (dates.length === 0) {
-    console.log('同期対象のバイタルデータはありませんでした。');
-    return;
-  }
+  const ss = getVitalSpreadsheet_();
 
-  // シートへ Upsert（既存日付は上書き、新規日付は追記）
-  const sheet = getVitalSheet_();
-  const lastRow = sheet.getLastRow();
-  const rowIndexByDate = {};
-
-  if (lastRow >= 2) {
-    const existingDates = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  // --- A. DailyVitals（1日1行）への Upsert ---
+  const dailySheet = getOrCreateSheet_(ss, DAILY_SHEET_NAME, [
+    'date', 'hrv_last_night', 'hrv_status', 'bb_max', 'bb_latest', 'stress_avg', 'steps', 'sleep_hours', 'updated_at'
+  ]);
+  const dailyLastRow = dailySheet.getLastRow();
+  const dailyRowMap = {};
+  if (dailyLastRow >= 2) {
+    const existingDates = dailySheet.getRange(2, 1, dailyLastRow - 1, 1).getValues();
     for (let i = 0; i < existingDates.length; i++) {
       const d = existingDates[i][0] instanceof Date
         ? Utilities.formatDate(existingDates[i][0], 'Asia/Tokyo', 'yyyy-MM-dd')
         : String(existingDates[i][0]);
-      rowIndexByDate[d] = i + 2;
+      dailyRowMap[d] = i + 2;
     }
   }
 
-  let updatedCount = 0;
-  let insertedCount = 0;
-
+  const dates = Object.keys(dailyMap).sort();
   for (const d of dates) {
     const rec = dailyMap[d];
     const rowValues = [
-      rec.date,
-      rec.hrvLastNight,
-      rec.hrvStatus,
-      rec.bbMax,
-      rec.bbLatest,
-      rec.stressAvg,
-      rec.steps,
-      rec.sleepHours,
-      updatedAt
+      rec.date, rec.hrvLastNight, rec.hrvStatus, rec.bbMax, rec.bbLatest, rec.stressAvg, rec.steps, rec.sleepHours, updatedAt
     ];
-
-    if (rowIndexByDate[d]) {
-      sheet.getRange(rowIndexByDate[d], 1, 1, 9).setValues([rowValues]);
-      updatedCount++;
+    if (dailyRowMap[d]) {
+      dailySheet.getRange(dailyRowMap[d], 1, 1, 9).setValues([rowValues]);
     } else {
-      sheet.appendRow(rowValues);
-      insertedCount++;
+      dailySheet.appendRow(rowValues);
+    }
+  }
+  if (dailySheet.getLastRow() >= 3) {
+    dailySheet.getRange(2, 1, dailySheet.getLastRow() - 1, 9).sort({ column: 1, ascending: true });
+  }
+
+  // --- B. IntradayVitals（1時間1行）への Upsert ---
+  const intradaySheet = getOrCreateSheet_(ss, INTRADAY_SHEET_NAME, [
+    'date_hour', 'date', 'hour', 'bb_level', 'updated_at'
+  ]);
+  const intraLastRow = intradaySheet.getLastRow();
+  const intraRowMap = {};
+  if (intraLastRow >= 2) {
+    const existingKeys = intradaySheet.getRange(2, 1, intraLastRow - 1, 1).getValues();
+    for (let i = 0; i < existingKeys.length; i++) {
+      intraRowMap[String(existingKeys[i][0])] = i + 2;
     }
   }
 
-  if (sheet.getLastRow() >= 3) {
-    sheet.getRange(2, 1, sheet.getLastRow() - 1, 9).sort({ column: 1, ascending: true });
+  const hourKeys = Object.keys(hourlyBbMap).sort();
+  let intraAdded = 0;
+  for (const k of hourKeys) {
+    const hRec = hourlyBbMap[k];
+    const rowValues = [hRec.dateHour, hRec.date, hRec.hour, hRec.bbLevel, updatedAt];
+    if (intraRowMap[k]) {
+      intradaySheet.getRange(intraRowMap[k], 1, 1, 5).setValues([rowValues]);
+    } else {
+      intradaySheet.appendRow(rowValues);
+      intraAdded++;
+    }
+  }
+  if (intradaySheet.getLastRow() >= 3) {
+    intradaySheet.getRange(2, 1, intradaySheet.getLastRow() - 1, 5).sort({ column: 1, ascending: true });
   }
 
-  console.log(`✅ バイタル同期完了（新規: ${insertedCount}件 / 更新: ${updatedCount}件）`);
+  console.log(`✅ バイタル同期完了（日次: ${dates.length}日分 / 時間帯別新規: ${intraAdded}件）`);
 }
 
 /**
- * 【Geminiプロンプト注入用】過去30日平均との比較＋直近推移を整形して返す
+ * 【Geminiプロンプト注入用】過去30日基準値＋今日の時間推移＋時間帯別の弱点分析を整形して返す
  */
 function getVitalSummaryForPrompt(recentDays) {
   const days = recentDays || 5;
-  const sheet = getVitalSheet_();
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) {
+  const ss = getVitalSpreadsheet_();
+  const dailySheet = ss.getSheetByName(DAILY_SHEET_NAME);
+  if (!dailySheet || dailySheet.getLastRow() < 2) {
     return '【バイタルデータ（Garmin）】記録なし';
   }
 
-  const rows = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+  const rows = dailySheet.getRange(2, 1, dailySheet.getLastRow() - 1, 9).getValues();
   const now = new Date();
+  const todayStr = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd');
   const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const fourteenDaysAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
   const recentCutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 
   let sumHrv = 0, cntHrv = 0;
@@ -326,13 +346,11 @@ function getVitalSummaryForPrompt(recentDays) {
     latest = { dateStr, hrv, hrvStatus, bbMax, bbLatest, stress, steps, sleep };
   }
 
-  if (!latest) {
-    return '【バイタルデータ（Garmin）】有効なデータなし';
-  }
+  if (!latest) return '【バイタルデータ（Garmin）】有効なデータなし';
 
   const lines = ['【バイタルデータ（Garmin 体調ログ）】'];
 
-  // 過去30日基準値
+  // 1. 過去30日基準値
   const baseParts = [];
   if (cntHrv > 0) baseParts.push(`HRV ${Math.round(sumHrv / cntHrv)}ms`);
   if (cntBbMax > 0) baseParts.push(`朝BodyBattery ${Math.round(sumBbMax / cntBbMax)}`);
@@ -342,7 +360,7 @@ function getVitalSummaryForPrompt(recentDays) {
     lines.push(`- 基準値（過去30日平均）: ${baseParts.join(' / ')}`);
   }
 
-  // 最新日の状態と疲労アラート判定
+  // 2. 最新日の状態
   const latestParts = [];
   if (latest.bbMax !== null && latest.bbLatest !== null) latestParts.push(`BodyBattery ${latest.bbMax}→${latest.bbLatest}`);
   if (latest.hrv !== null) latestParts.push(`HRV ${latest.hrv}ms (${latest.hrvStatus || '-'})`);
@@ -362,8 +380,72 @@ function getVitalSummaryForPrompt(recentDays) {
 
   lines.push(`- 最新（${latest.dateStr}）: ${latestParts.join(' / ')}${conditionTag}`);
 
+  // 3. 時間帯別データの集計（今日の時間推移 ＋ 過去14日の時間帯別消耗パターン）
+  const intraSheet = ss.getSheetByName(INTRADAY_SHEET_NAME);
+  if (intraSheet && intraSheet.getLastRow() >= 2) {
+    const intraRows = intraSheet.getRange(2, 1, intraSheet.getLastRow() - 1, 4).getValues();
+    const todayHours = [];
+
+    // 5つの時間帯ブロックで過去14日の平均残量を集計
+    const blocks = [
+      { label: '朝(07-09時)', min: 7, max: 9, sum: 0, cnt: 0 },
+      { label: '昼(11-13時)', min: 11, max: 13, sum: 0, cnt: 0 },
+      { label: '午後(14-16時)', min: 14, max: 16, sum: 0, cnt: 0 },
+      { label: '夕方(17-19時)', min: 17, max: 19, sum: 0, cnt: 0 },
+      { label: '夜(20-22時)', min: 20, max: 22, sum: 0, cnt: 0 }
+    ];
+
+    for (const r of intraRows) {
+      const dStr = r[1] instanceof Date
+        ? Utilities.formatDate(r[1], 'Asia/Tokyo', 'yyyy-MM-dd')
+        : String(r[1]);
+      const hr = Number(r[2]);
+      const bb = Number(r[3]);
+      if (isNaN(hr) || isNaN(bb)) continue;
+
+      if (dStr === todayStr) {
+        const hh = hr < 10 ? `0${hr}` : `${hr}`;
+        todayHours.push(`${hh}時:${bb}`);
+      }
+
+      const dObj = new Date(dStr);
+      if (!isNaN(dObj.getTime()) && dObj >= fourteenDaysAgo) {
+        for (const b of blocks) {
+          if (hr >= b.min && hr <= b.max) {
+            b.sum += bb;
+            b.cnt++;
+          }
+        }
+      }
+    }
+
+    if (todayHours.length > 0) {
+      lines.push(`- 今日のBody Battery推移: ${todayHours.join(' → ')}`);
+    }
+
+    // 時間帯別の平均と「最も消耗が激しい区間」の特定
+    const validBlocks = blocks.filter(function(b) { return b.cnt > 0; }).map(function(b) {
+      return { label: b.label, avg: Math.round(b.sum / b.cnt) };
+    });
+
+    if (validBlocks.length >= 2) {
+      let maxDrop = 0;
+      let maxDropLabel = '';
+      for (let i = 1; i < validBlocks.length; i++) {
+        const drop = validBlocks[i - 1].avg - validBlocks[i].avg;
+        if (drop > maxDrop) {
+          maxDrop = drop;
+          maxDropLabel = `${validBlocks[i - 1].label}→${validBlocks[i].label} (-${drop})`;
+        }
+      }
+      const trendStr = validBlocks.map(function(b) { return `${b.label}:${b.avg}`; }).join(' → ');
+      const alertStr = maxDrop > 0 ? `（※最も消耗が激しい区間: ${maxDropLabel}）` : '';
+      lines.push(`- 時間帯別の消耗傾向（過去14日平均）: ${trendStr} ${alertStr}`);
+    }
+  }
+
   if (recentLines.length > 0) {
-    lines.push(`- 直近${days}日間の推移:\n${recentLines.join('\n')}`);
+    lines.push(`- 直近${days}日間の日次推移:\n${recentLines.join('\n')}`);
   }
 
   return lines.join('\n');
