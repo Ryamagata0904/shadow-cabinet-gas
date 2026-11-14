@@ -484,9 +484,25 @@ function scheduleDynamicIntervention() {
     const todayJst = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm (E)');
     const recentLogs = getLogsForLastDays(LOG_DOC_ID, DYNAMIC_INTERVENTION_LOG_DAYS);
 
+    // --- ここから休日判定ロジックを追加 ---
+    const dayOfWeek = now.getDay();
+    const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6); // 0:日, 6:土
+
+    // 日本の祝日カレンダーから今日の予定を取得して祝日判定
+    const holidayCalendar = CalendarApp.getCalendarById('ja.japanese#holiday@group.v.calendar.google.com');
+    const holidaysToday = holidayCalendar.getEventsForDay(now);
+    const isHoliday = isWeekend || holidaysToday.length > 0;
+
+    // 仕事の日か休みの日かで、AIに渡す「今日の癖・前提」を切り替える
+    const behaviorContext = isHoliday
+      ? "本日は【休日】です。「退勤」などの仕事の概念は除外してください。休日の昼夜逆転、ダラダラとしたスマホ逃避、夜ふかし等の癖を考慮し、"
+      : "本日は【仕事（平日）】です。昼のブレインフォグ、18:00退勤の引き延ばし、夜のソファ沈没等の癖を考慮し、";
+    // --- ここまで ---
+
+
     const prompt = `
 あなたは Shadow Cabinet の行動介入スケジューラです。
-今日のユーザーの状況・癖（昼のブレインフォグ、18:00退勤の引き延ばし、夜のソファ沈没、スマホ逃避等）を考慮し、
+${behaviorContext}
 本日行動介入が必要なタイミングを【1〜5回】の間で決定し、その時刻を選定せよ。
 選ぶ時刻はすべて現在時刻より後であること。
 

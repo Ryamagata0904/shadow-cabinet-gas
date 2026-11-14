@@ -1,3 +1,5 @@
 .clasprc.json
 node_modules/
 .env
+creds.json
+.clasprc.json
