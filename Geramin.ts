@@ -203,27 +203,24 @@ function getVitalSummaryForPrompt(recentDays = 7) {
   return lines.join('\n');
 }
 
-function testGarminEndpoints() {
+function testGarminHealthEndpoints() {
   const token = getGarminAccessToken_();
   const now = new Date();
-  const start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const start = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
 
   const startDate = Utilities.formatDate(start, 'Asia/Tokyo', 'yyyy-MM-dd');
   const endDate = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd');
-  const startSec = Math.floor(start.getTime() / 1000);
-  const endSec = Math.floor(now.getTime() / 1000);
 
-  // Garmin Connect / Personal API で使われる代表的な血圧エンドポイント候補
-  const candidates = [
-    `/bloodpressure-service/bloodpressure/${startDate}/${endDate}`,
-    `/bloodpressure-service/bloodpressure/daily/${endDate}`,
-    `/wellness-api/rest/bloodPressures?uploadStartTimeInSeconds=${startSec}&uploadEndTimeInSeconds=${endSec}`,
-    `/personal-api/wellness/bloodPressures?uploadStartTimeInSeconds=${startSec}&uploadEndTimeInSeconds=${endSec}`,
-    `/personal-api/bloodpressure/range/${startDate}/${endDate}`
+  const endpoints = [
+    { name: 'HRV（心拍変動）', path: `/hrv-service/hrv/daily/${startDate}/${endDate}` },
+    { name: 'ストレスレベル', path: `/usersummary-service/stats/stress/daily/${startDate}/${endDate}` },
+    { name: '日次サマリー', path: `/usersummary-service/v2/dailysummaries?startDate=${startDate}&endDate=${endDate}` },
+    { name: '睡眠サマリー', path: `/sleep-service/sleep/dailySleepSummariesByDate?startDate=${startDate}&endDate=${endDate}` },
+    { name: 'Body Battery', path: `/wellness-service/wellness/bodyBattery/reports/daily?startDate=${startDate}&endDate=${endDate}` }
   ];
 
-  for (const path of candidates) {
-    const res = UrlFetchApp.fetch(`${GARMIN_BASE_URL}${path}`, {
+  for (const ep of endpoints) {
+    const res = UrlFetchApp.fetch(`${GARMIN_BASE_URL}${ep.path}`, {
       method: 'get',
       headers: {
         Authorization: `Bearer ${token}`,
@@ -233,9 +230,11 @@ function testGarminEndpoints() {
     });
 
     const code = res.getResponseCode();
-    console.log(`[${code}] ${path}`);
+    console.log(`=== ${ep.name} [${code}] ===`);
     if (code === 200) {
-      console.log('★取得成功レスポンス:', res.getContentText().slice(0, 500));
+      console.log(res.getContentText().slice(0, 600));
+    } else {
+      console.log('エラー内容:', res.getContentText().slice(0, 200));
     }
   }
 }
