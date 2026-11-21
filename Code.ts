@@ -102,62 +102,51 @@ function determineRequiredLogCount(userInput) {
 function onMessage(event) {
   console.log(JSON.stringify(event));
 
-  // Google Chat の自動リトライによる二重実行を防止
+  // 1. Google Chatの自動リトライによる二重実行を防止
   const messageName = event?.chat?.messagePayload?.message?.name || event?.message?.name;
   const cache = CacheService.getScriptCache();
   if (messageName) {
-    if (cache.get(messageName)) {
-      console.log("重複リクエストをスキップ: " + messageName);
-      return;
-    }
-    cache.put(messageName, "1", 300); // 5分間ロック
+    if (cache.get(messageName)) return;
+    cache.put(messageName, "1", 300);
   }
 
-  // フォールバック後の spaceName を確実に保存（sendChatNotification 用）
+  // 2. スペースIDを確実に保存
   const spaceName = event?.chat?.messagePayload?.message?.space?.name
                  || event?.message?.space?.name
                  || event?.space?.name;
-
   if (spaceName) {
     PropertiesService.getScriptProperties().setProperty('SPACE_NAME', spaceName);
   }
 
   const userMessage = event?.chat?.messagePayload?.message?.text || event?.message?.text;
-  if (!userMessage) {
-    console.log("メッセージテキストを取得できませんでした。");
-    return;
-  }
+  if (!userMessage) return;
 
-  // 連続送信に耐えられるようロックをかけてキューに積む
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
   try {
-    const props = PropertiesService.getScriptProperties();
-    const queue = JSON.parse(props.getProperty('MESSAGE_QUEUE') || '[]');
-    queue.push({
-      userMessage: userMessage,
-      timestamp: Date.now()
-    });
-    props.setProperty('MESSAGE_QUEUE', JSON.stringify(queue));
+    console.time("TotalReply");
+    const replyText = generateGeminiReply(userMessage);
+    saveLogToDoc(userMessage, replyText);
+    console.timeEnd("TotalReply");
 
-    // 未予約なら1秒後にバックグラウンド処理を起動
-    scheduleQueueWorker();
-  } finally {
-    lock.releaseLock();
-  }
-
-  // 即時レスポンス（※受付メッセージが不要な場合はこの return ブロックを消して return; にしてください）
-  return {
-    hostAppDataAction: {
-      chatDataAction: {
-        createMessageAction: {
-          message: {
-            text: "⏳ 確認しています..."
+    return {
+      hostAppDataAction: {
+        chatDataAction: {
+          createMessageAction: {
+            message: { text: replyText }
           }
         }
       }
-    }
-  };
+    };
+  } catch (e) {
+    return {
+      hostAppDataAction: {
+        chatDataAction: {
+          createMessageAction: {
+            message: { text: "⚠️ システムエラーが発生しました: " + e.toString() }
+          }
+        }
+      }
+    };
+  }
 }
 
 /**
