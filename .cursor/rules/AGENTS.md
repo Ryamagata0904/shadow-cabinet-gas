@@ -10,6 +10,8 @@
 - `.github/workflows/deploy.yml`: `main` ブランチへのプッシュ・マージをトリガーに clasp push を行う CI/CD 定義。
 - `appsscript.json`: GAS のマニフェスト（タイムゾーン、OAuth スコープ、Chat 拡張設定）。
 - `.clasp.json`: プッシュ先 GAS プロジェクトの識別設定（Git 管理対象）。
+- `Geramin.ts`: Gemini API 呼び出し・プロンプト組み立て。
+
 
 ---
 
