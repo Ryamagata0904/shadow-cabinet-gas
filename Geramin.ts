@@ -281,6 +281,13 @@ function syncGarminVitalsToSheet() {
   }
 
   console.log(`✅ バイタル同期完了（日次: ${dates.length}日分 / 時間帯別新規: ${intraAdded}件）`);
+  try {
+    const cache = CacheService.getScriptCache();
+    cache.remove('VITAL_SUMMARY_5');
+    cache.remove('VITAL_SUMMARY_CACHE');
+  } catch (e) {
+    console.warn('バイタルキャッシュの削除をスキップ: ' + e);
+  }
 }
 
 /**
@@ -288,10 +295,27 @@ function syncGarminVitalsToSheet() {
  */
 function getVitalSummaryForPrompt(recentDays) {
   const days = recentDays || 5;
+  const cacheKey = 'VITAL_SUMMARY_' + days;
+  try {
+    const cached = CacheService.getScriptCache().get(cacheKey);
+    if (cached) return cached;
+  } catch (e) {
+    console.warn('バイタルキャッシュの読込をスキップ: ' + e);
+  }
+
+  function finish(summary) {
+    try {
+      CacheService.getScriptCache().put(cacheKey, summary, 900);
+    } catch (e) {
+      console.warn('バイタルキャッシュの保存をスキップ: ' + e);
+    }
+    return summary;
+  }
+
   const ss = getVitalSpreadsheet_();
   const dailySheet = ss.getSheetByName(DAILY_SHEET_NAME);
   if (!dailySheet || dailySheet.getLastRow() < 2) {
-    return '【バイタルデータ（Garmin）】記録なし';
+    return finish('【バイタルデータ（Garmin）】記録なし');
   }
 
   const rows = dailySheet.getRange(2, 1, dailySheet.getLastRow() - 1, 9).getValues();
@@ -346,7 +370,7 @@ function getVitalSummaryForPrompt(recentDays) {
     latest = { dateStr, hrv, hrvStatus, bbMax, bbLatest, stress, steps, sleep };
   }
 
-  if (!latest) return '【バイタルデータ（Garmin）】有効なデータなし';
+  if (!latest) return finish('【バイタルデータ（Garmin）】有効なデータなし');
 
   const lines = ['【バイタルデータ（Garmin 体調ログ）】'];
 
@@ -448,7 +472,7 @@ function getVitalSummaryForPrompt(recentDays) {
     lines.push(`- 直近${days}日間の日次推移:\n${recentLines.join('\n')}`);
   }
 
-  return lines.join('\n');
+  return finish(lines.join('\n'));
 }
 function testGarminHealthEndpoints() {
   const token = getGarminAccessToken_();

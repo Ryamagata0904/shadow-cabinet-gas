@@ -17,26 +17,81 @@ const DYNAMIC_INTERVENTION_LOG_DAYS = 3;
 const DEFAULT_INTERVENTION_TIME = '19:30';
 const INTERVENTION_CLOCK_PATTERN = /(?:[01]\d|2[0-3]):[0-5]\d/;
 
+const RECENT_LOG_TAIL_KEY = 'RECENT_LOG_TAIL';
+const RECENT_LOG_TAIL_LIMIT = 10;
+const RECENT_LOG_TAIL_TTL_SEC = 21600;
+
+/**
+ * 直近ログ末尾のキャッシュを読む。壊れていれば null。
+ */
+function readRecentLogTail() {
+  try {
+    const raw = CacheService.getScriptCache().get(RECENT_LOG_TAIL_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed;
+  } catch (e) {
+    console.warn('短期記憶キャッシュの読込をスキップ: ' + e);
+    return null;
+  }
+}
+
+/**
+ * 直近10件だけをキャッシュする。100KB 上限を超える場合は保存しない。
+ */
+function writeRecentLogTail(entries) {
+  try {
+    const trimmed = entries.slice(-RECENT_LOG_TAIL_LIMIT);
+    const payload = JSON.stringify(trimmed);
+    if (payload.length > 90000) {
+      console.warn('短期記憶キャッシュが上限に近いため保存しません。文字数: ' + payload.length);
+      return;
+    }
+    CacheService.getScriptCache().put(RECENT_LOG_TAIL_KEY, payload, RECENT_LOG_TAIL_TTL_SEC);
+  } catch (e) {
+    console.warn('短期記憶キャッシュの保存をスキップ: ' + e);
+  }
+}
+
 /**
  * log.xml から直近 N 件の対話履歴（短期記憶）を自動抽出する関数
  */
 function getRecentLogs(fileId, count = 2) {
+  console.time('getRecentLogs');
   try {
     if (!fileId) return "（過去ログなし）";
+    const safeCount = count > 0 ? count : 0;
+    const cached = readRecentLogTail();
+    if (cached && cached.length >= safeCount) {
+      const recent = cached.slice(-safeCount).join('\n');
+      console.log('短期記憶キャッシュヒット: ' + safeCount + '件');
+      return recent || "（過去ログなし）";
+    }
+
     const file = DriveApp.getFileById(fileId.trim());
     const content = file.getBlob().getDataAsString();
-    
+
     const entries = content.split('</log_entry>');
-    if (entries.length <= 1) return "（過去ログなし）";
-    
-    const recent = entries.slice(-count - 1, -1)
-      .map(e => e.trim() + '</log_entry>')
-      .join('\n');
-      
-    return recent;
+    if (entries.length <= 1) {
+      writeRecentLogTail([]);
+      return "（過去ログなし）";
+    }
+
+    const all = [];
+    for (let i = 0; i < entries.length - 1; i++) {
+      const entry = entries[i].trim();
+      if (entry) all.push(entry + '</log_entry>');
+    }
+    writeRecentLogTail(all);
+
+    const recent = all.slice(-safeCount).join('\n');
+    return recent || "（過去ログなし）";
   } catch (e) {
     console.error("短期記憶の取得エラー: " + e.toString());
     return "（過去ログ取得失敗）";
+  } finally {
+    console.timeEnd('getRecentLogs');
   }
 }
 
@@ -198,23 +253,18 @@ function processMessageQueue(e) {
 }
 
 /**
- * Gemini API 呼び出し本体（バイタル15分キャッシュ付き）
+ * Gemini API 呼び出し本体
  */
 function generateGeminiReply(userMessage) {
   const logCount = determineRequiredLogCount(userMessage);
   const recentLogs = logCount > 0 ? getRecentLogs(LOG_DOC_ID, logCount) : "";
   const nowJst = Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd HH:mm:ss (E)");
 
-  const cache = CacheService.getScriptCache();
-  let vitalSummary = cache.get('VITAL_SUMMARY_CACHE');
-  if (!vitalSummary) {
-    try {
-      vitalSummary = getVitalSummaryForPrompt(5);
-      cache.put('VITAL_SUMMARY_CACHE', vitalSummary, 900); // 15分キャッシュ
-    } catch (e) {
-      console.warn('バイタルサマリー取得スキップ: ' + e);
-      vitalSummary = '【バイタルデータ（Garmin）】データ未取得';
-    }
+  let vitalSummary = '【バイタルデータ（Garmin）】データ未取得';
+  try {
+    vitalSummary = getVitalSummaryForPrompt(5);
+  } catch (e) {
+    console.warn('バイタルサマリー取得スキップ: ' + e);
   }
 
   const enrichedUserMessage = `
@@ -280,6 +330,7 @@ function scheduleQueueWorker() {
 
 
 function saveLogToDoc(userText, replyText) {
+  console.time('saveLogToDoc');
   try {
     if (!LOG_DOC_ID) {
       console.error("LOG_DOC_ID が未設定です。");
@@ -299,10 +350,16 @@ function saveLogToDoc(userText, replyText) {
   <ai_response><![CDATA[${replyText}]]></ai_response>
 </log_entry>`;
 
-    file.setContent(currentContent + newEntry);
-    console.log("XMLログの保存に成功しました。");
+    const saved = currentContent + newEntry;
+    file.setContent(saved);
+    const cached = readRecentLogTail() || [];
+    cached.push(newEntry.trim());
+    writeRecentLogTail(cached);
+    console.log("XMLログの保存に成功しました。文字数: " + saved.length);
   } catch (e) {
     console.error("ログ保存エラー: " + e.toString());
+  } finally {
+    console.timeEnd('saveLogToDoc');
   }
 }
 
@@ -438,6 +495,11 @@ ${logText}
       saveWeeklyArchive(logText);
     }
     file.setContent('<?xml version="1.0" encoding="UTF-8"?>\n<logs>\n');
+    try {
+      CacheService.getScriptCache().remove(RECENT_LOG_TAIL_KEY);
+    } catch (cacheErr) {
+      console.warn('短期記憶キャッシュの削除をスキップ: ' + cacheErr);
+    }
     console.log("週次レビューおよびPR作成が正常に完了しました。");
 
   } catch (e) {
