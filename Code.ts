@@ -96,43 +96,141 @@ function determineRequiredLogCount(userInput) {
   }
 }
 
+/**
+ * 1. Google Chat からの受信窓口（1秒未満で即答してタイムアウトを回避）
+ */
 function onMessage(event) {
   console.log(JSON.stringify(event));
 
-  const spaceName = event?.space?.name 
-                 || event?.message?.space?.name 
-                 || event?.chat?.messagePayload?.message?.space?.name
-                 || "取得不可";
+  // Google Chat の自動リトライによる二重実行を防止
+  const messageName = event?.chat?.messagePayload?.message?.name || event?.message?.name;
+  const cache = CacheService.getScriptCache();
+  if (messageName) {
+    if (cache.get(messageName)) {
+      console.log("重複リクエストをスキップ: " + messageName);
+      return;
+    }
+    cache.put(messageName, "1", 300); // 5分間ロック
+  }
 
-  if (event?.space?.name) {
-    PropertiesService.getScriptProperties().setProperty('SPACE_NAME', event.space.name);
+  // フォールバック後の spaceName を確実に保存（sendChatNotification 用）
+  const spaceName = event?.chat?.messagePayload?.message?.space?.name
+                 || event?.message?.space?.name
+                 || event?.space?.name;
+
+  if (spaceName) {
+    PropertiesService.getScriptProperties().setProperty('SPACE_NAME', spaceName);
   }
 
   const userMessage = event?.chat?.messagePayload?.message?.text || event?.message?.text;
-  
   if (!userMessage) {
     console.log("メッセージテキストを取得できませんでした。");
     return;
   }
 
-  // 過去ログの件数を判定
+  // 連続送信に耐えられるようロックをかけてキューに積む
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const queue = JSON.parse(props.getProperty('MESSAGE_QUEUE') || '[]');
+    queue.push({
+      userMessage: userMessage,
+      timestamp: Date.now()
+    });
+    props.setProperty('MESSAGE_QUEUE', JSON.stringify(queue));
+
+    // 未予約なら1秒後にバックグラウンド処理を起動
+    scheduleQueueWorker();
+  } finally {
+    lock.releaseLock();
+  }
+
+  // 即時レスポンス（※受付メッセージが不要な場合はこの return ブロックを消して return; にしてください）
+  return {
+    hostAppDataAction: {
+      chatDataAction: {
+        createMessageAction: {
+          message: {
+            text: "⏳ 確認しています..."
+          }
+        }
+      }
+    }
+  };
+}
+
+/**
+ * 2. トリガーからバックグラウンド実行される応答処理
+ * @param {GoogleAppsScript.Events.TimeDriven} e
+ */
+function processMessageQueue(e) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return;
+
+  let task = null;
+  let hasMore = false;
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const queue = JSON.parse(props.getProperty('MESSAGE_QUEUE') || '[]');
+    if (queue.length === 0) return;
+
+    task = queue.shift();
+    hasMore = queue.length > 0;
+    props.setProperty('MESSAGE_QUEUE', JSON.stringify(queue));
+  } finally {
+    lock.releaseLock();
+  }
+
+  try {
+    if (!task) return;
+
+    const replyText = generateGeminiReply(task.userMessage);
+    saveLogToDoc(task.userMessage, replyText);
+
+    // 既存のプッシュ送信メソッドで返信
+    sendChatNotification(replyText);
+
+  } catch (err) {
+    console.error("バックグラウンド応答エラー: " + err.toString());
+    sendChatNotification("⚠️ システムエラーが発生しました: " + err.toString());
+  } finally {
+    // 既存の単体トリガー削除ヘルパーを利用（手動テスト実行時も安全に動くよう保護）
+    if (e && typeof deleteSingleTrigger === 'function') {
+      deleteSingleTrigger(e);
+    }
+
+    // 処理中に追加メッセージが来ていれば次のトリガーを予約
+    const remaining = JSON.parse(PropertiesService.getScriptProperties().getProperty('MESSAGE_QUEUE') || '[]');
+    if (hasMore || remaining.length > 0) {
+      scheduleQueueWorker();
+    }
+  }
+}
+
+/**
+ * Gemini API 呼び出し本体（バイタル15分キャッシュ付き）
+ */
+function generateGeminiReply(userMessage) {
   const logCount = determineRequiredLogCount(userMessage);
   const recentLogs = logCount > 0 ? getRecentLogs(LOG_DOC_ID, logCount) : "";
-
   const nowJst = Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd HH:mm:ss (E)");
 
-  // バイタル要約を取得（取得失敗時もメイン処理が止まらないよう保護）
-  let vitalSummary = '【バイタルデータ（Garmin）】データ未取得';
-  try {
-    vitalSummary = getVitalSummaryForPrompt(5);
-  } catch (e) {
-    console.warn('バイタルサマリー取得スキップ: ' + e);
+  const cache = CacheService.getScriptCache();
+  let vitalSummary = cache.get('VITAL_SUMMARY_CACHE');
+  if (!vitalSummary) {
+    try {
+      vitalSummary = getVitalSummaryForPrompt(5);
+      cache.put('VITAL_SUMMARY_CACHE', vitalSummary, 900); // 15分キャッシュ
+    } catch (e) {
+      console.warn('バイタルサマリー取得スキップ: ' + e);
+      vitalSummary = '【バイタルデータ（Garmin）】データ未取得';
+    }
   }
 
   const enrichedUserMessage = `
 【現在日時 (JST)】
 ${nowJst}
-
 
 ${vitalSummary}
 
@@ -164,55 +262,33 @@ ${userMessage}
     muteHttpExceptions: true
   };
 
-  try {
-    // @ts-ignore
-    const response = UrlFetchApp.fetch(url, options);
-    const json = JSON.parse(response.getContentText());
+  // @ts-ignore
+  const response = UrlFetchApp.fetch(url, options);
+  const json = JSON.parse(response.getContentText());
 
-    if (json.error) {
-      console.error("Gemini API Error:", JSON.stringify(json.error));
-      return {
-        hostAppDataAction: {
-          chatDataAction: {
-            createMessageAction: {
-              message: {
-                text: `⚠️ APIエラー (${json.error.code}): ${json.error.message}`
-              }
-            }
-          }
-        }
-      };
-    }
+  if (json.error) {
+    console.error("Gemini API Error:", JSON.stringify(json.error));
+    return `⚠️ APIエラー (${json.error.code}): ${json.error.message}`;
+  }
 
-    const replyText = json?.candidates?.[0]?.content?.parts?.[0]?.text || "回答を取得できませんでした。";
-    saveLogToDoc(userMessage, replyText);
+  return json?.candidates?.[0]?.content?.parts?.[0]?.text || "回答を取得できませんでした。";
+}
 
-    return {
-      hostAppDataAction: {
-        chatDataAction: {
-          createMessageAction: {
-            message: {
-              text: replyText
-            }
-          }
-        }
-      }
-    };
-
-  } catch (e) {
-    return {
-      hostAppDataAction: {
-        chatDataAction: {
-          createMessageAction: {
-            message: {
-              text: "⚠️ システムエラーが発生しました: " + e.toString()
-            }
-          }
-        }
-      }
-    };
+/**
+ * 重複トリガーを防ぎつつ1秒後実行を予約するヘルパー
+ */
+function scheduleQueueWorker() {
+  const exists = ScriptApp.getProjectTriggers().some(
+    t => t.getHandlerFunction() === 'processMessageQueue'
+  );
+  if (!exists) {
+    ScriptApp.newTrigger('processMessageQueue')
+      .timeBased()
+      .after(1000)
+      .create();
   }
 }
+
 
 function saveLogToDoc(userText, replyText) {
   try {
